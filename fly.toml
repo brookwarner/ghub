@@ -1,4 +1,4 @@
-app = "multi-gmail-tzak"
+app = "multi-gmail"
 primary_region = "iad"
 
 [env]
