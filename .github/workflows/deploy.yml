@@ -1,0 +1,84 @@
+name: Deploy multi-gmail MCP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DO_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Write .env on server
+        env:
+          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          DO_USERNAME: ${{ secrets.DO_USERNAME }}
+          DO_HOST: ${{ secrets.DO_HOST }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" "
+            mkdir -p /var/data/multi-gmail /var/www/mcp.brookwarner.com
+            cat > /var/www/mcp.brookwarner.com/.env << 'ENVEOF'
+          NODE_ENV=production
+          PORT=8080
+          GMAILMCPCONFIG_DIR=/var/data/multi-gmail
+          SECRET_TOKEN=$SECRET_TOKEN
+          ENVEOF
+            chmod 600 /var/www/mcp.brookwarner.com/.env
+          "
+
+      - name: Deploy to server
+        env:
+          DO_USERNAME: ${{ secrets.DO_USERNAME }}
+          DO_HOST: ${{ secrets.DO_HOST }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" << 'EOF'
+            set -e
+            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+            DEPLOY_PATH="/var/www/mcp.brookwarner.com"
+
+            if [ ! -d "$DEPLOY_PATH/.git" ]; then
+              echo "First deploy — cloning repository..."
+              rm -rf "$DEPLOY_PATH"
+              git clone git@github.com:brookwarner/multi-gmail-tzak.git "$DEPLOY_PATH"
+            fi
+
+            cd "$DEPLOY_PATH"
+
+            echo "Pulling latest code..."
+            git fetch origin
+            git reset --hard origin/main
+
+            echo "Installing dependencies..."
+            npm install --omit=dev --ignore-scripts
+
+            echo "Restarting PM2..."
+            pm2 restart multi-gmail --update-env || \
+              pm2 start dist/index.js --name multi-gmail
+            pm2 save
+
+            echo "Done. Deployed commit: $(git rev-parse --short HEAD)"
+          EOF
+
+      - name: Verify deployment
+        run: |
+          sleep 5
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://mcp.brookwarner.com/health || echo "000")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Health check passed (HTTP $HTTP_STATUS)"
+          else
+            echo "Health check returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
