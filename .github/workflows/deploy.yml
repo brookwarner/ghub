@@ -21,36 +21,25 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.DO_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Write .env on server
-        env:
-          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
-          DO_USERNAME: ${{ secrets.DO_USERNAME }}
-          DO_HOST: ${{ secrets.DO_HOST }}
-        run: |
-          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" bash << SSHEOF
-            mkdir -p /var/data/multi-gmail /var/www/mcp.brookwarner.com
-            printf 'NODE_ENV=production\nPORT=8080\nGMAILMCPCONFIG_DIR=/var/data/multi-gmail\nSECRET_TOKEN=%s\n' "$SECRET_TOKEN" > /var/www/mcp.brookwarner.com/.env
-            chmod 600 /var/www/mcp.brookwarner.com/.env
-          SSHEOF
-
       - name: Deploy to server
         env:
           DO_USERNAME: ${{ secrets.DO_USERNAME }}
           DO_HOST: ${{ secrets.DO_HOST }}
+          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" << 'EOF'
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" bash << SSHEOF
             set -e
-            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+            export PATH="/usr/local/bin:/usr/bin:/bin:\$PATH"
 
             DEPLOY_PATH="/var/www/mcp.brookwarner.com"
 
-            if [ ! -d "$DEPLOY_PATH/.git" ]; then
+            if [ ! -d "\$DEPLOY_PATH/.git" ]; then
               echo "First deploy — cloning repository..."
-              rm -rf "$DEPLOY_PATH"
-              git clone git@github.com:brookwarner/multi-gmail-tzak.git "$DEPLOY_PATH"
+              rm -rf "\$DEPLOY_PATH"
+              git clone git@github.com:brookwarner/multi-gmail-tzak.git "\$DEPLOY_PATH"
             fi
 
-            cd "$DEPLOY_PATH"
+            cd "\$DEPLOY_PATH"
 
             echo "Pulling latest code..."
             git fetch origin
@@ -59,14 +48,18 @@ jobs:
             echo "Installing dependencies..."
             npm install --omit=dev --ignore-scripts
 
+            echo "Writing .env..."
+            mkdir -p /var/data/multi-gmail
+            printf 'NODE_ENV=production\nPORT=8080\nGMAILMCPCONFIG_DIR=/var/data/multi-gmail\nSECRET_TOKEN=%s\n' "$SECRET_TOKEN" > "\$DEPLOY_PATH/.env"
+            chmod 600 "\$DEPLOY_PATH/.env"
+
             echo "Restarting PM2..."
-            set -a; source /var/www/mcp.brookwarner.com/.env; set +a
             pm2 restart multi-gmail --update-env || \
               pm2 start dist/index.js --name multi-gmail
             pm2 save
 
-            echo "Done. Deployed commit: $(git rev-parse --short HEAD)"
-          EOF
+            echo "Done. Deployed commit: \$(git rev-parse --short HEAD)"
+          SSHEOF
 
       - name: Verify deployment
         run: |
