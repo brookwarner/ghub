@@ -48,14 +48,10 @@ jobs:
             echo "Installing dependencies..."
             npm install --omit=dev --ignore-scripts
 
-            echo "Writing .env..."
+            echo "Starting PM2..."
             mkdir -p /var/data/multi-gmail
-            printf 'NODE_ENV=production\nPORT=8080\nGMAILMCPCONFIG_DIR=/var/data/multi-gmail\nSECRET_TOKEN=%s\n' "$SECRET_TOKEN" > "\$DEPLOY_PATH/.env"
-            chmod 600 "\$DEPLOY_PATH/.env"
-
-            echo "Restarting PM2..."
-            pm2 restart multi-gmail --update-env || \
-              pm2 start dist/index.js --name multi-gmail
+            SECRET_TOKEN="$SECRET_TOKEN" pm2 restart ecosystem.config.cjs --update-env || \
+              SECRET_TOKEN="$SECRET_TOKEN" pm2 start ecosystem.config.cjs
             pm2 save
 
             echo "Done. Deployed commit: \$(git rev-parse --short HEAD)"

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import 'dotenv/config';
 
 import { promises as fs } from 'node:fs';
 import express, { type Request, type Response } from 'express';

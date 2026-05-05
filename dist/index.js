@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import 'dotenv/config';
 import { promises as fs } from 'node:fs';
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
