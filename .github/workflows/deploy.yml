@@ -27,16 +27,11 @@ jobs:
           DO_USERNAME: ${{ secrets.DO_USERNAME }}
           DO_HOST: ${{ secrets.DO_HOST }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" "
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" bash << SSHEOF
             mkdir -p /var/data/multi-gmail /var/www/mcp.brookwarner.com
-            cat > /var/www/mcp.brookwarner.com/.env << 'ENVEOF'
-          NODE_ENV=production
-          PORT=8080
-          GMAILMCPCONFIG_DIR=/var/data/multi-gmail
-          SECRET_TOKEN=$SECRET_TOKEN
-          ENVEOF
+            printf 'NODE_ENV=production\nPORT=8080\nGMAILMCPCONFIG_DIR=/var/data/multi-gmail\nSECRET_TOKEN=%s\n' "$SECRET_TOKEN" > /var/www/mcp.brookwarner.com/.env
             chmod 600 /var/www/mcp.brookwarner.com/.env
-          "
+          SSHEOF
 
       - name: Deploy to server
         env:
