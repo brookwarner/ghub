@@ -60,6 +60,7 @@ jobs:
             npm install --omit=dev --ignore-scripts
 
             echo "Restarting PM2..."
+            set -a; source /var/www/mcp.brookwarner.com/.env; set +a
             pm2 restart multi-gmail --update-env || \
               pm2 start dist/index.js --name multi-gmail
             pm2 save

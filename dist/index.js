@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 import { promises as fs } from 'node:fs';
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { randomUUID } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { ensureConfigLayout, getAccountPaths, getConfigRoot, getDefaultAccountPaths, loadAccountsConfig, saveAccountsConfig, upsertAccount, validateAccountId, } from './config.js';
@@ -1410,6 +1412,91 @@ class GmailMultiInboxServer {
                         additionalProperties: false,
                     },
                 },
+                // Tasks
+                {
+                    name: 'list_tasklists',
+                    description: 'List all Google Task lists for an account.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                        },
+                        additionalProperties: false,
+                    },
+                },
+                {
+                    name: 'list_tasks',
+                    description: 'List tasks in a task list.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                            task_list_id: { type: 'string', description: 'Task list ID (from list_tasklists).' },
+                            include_completed: { type: 'boolean', description: 'Include completed tasks (default false).' },
+                        },
+                        required: ['task_list_id'],
+                        additionalProperties: false,
+                    },
+                },
+                {
+                    name: 'add_task',
+                    description: 'Add a new task to a task list.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                            task_list_id: { type: 'string', description: 'Task list ID.' },
+                            title: { type: 'string', description: 'Task title.' },
+                            notes: { type: 'string', description: 'Optional notes.' },
+                            due: { type: 'string', description: 'Due date in RFC 3339 format (e.g. 2025-05-10T00:00:00.000Z).' },
+                        },
+                        required: ['task_list_id', 'title'],
+                        additionalProperties: false,
+                    },
+                },
+                {
+                    name: 'complete_task',
+                    description: 'Mark a task as completed.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                            task_list_id: { type: 'string', description: 'Task list ID.' },
+                            task_id: { type: 'string', description: 'Task ID.' },
+                        },
+                        required: ['task_list_id', 'task_id'],
+                        additionalProperties: false,
+                    },
+                },
+                {
+                    name: 'delete_task',
+                    description: 'Delete a task.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                            task_list_id: { type: 'string', description: 'Task list ID.' },
+                            task_id: { type: 'string', description: 'Task ID.' },
+                        },
+                        required: ['task_list_id', 'task_id'],
+                        additionalProperties: false,
+                    },
+                },
+                {
+                    name: 'move_task',
+                    description: 'Move a task to a different position in the list. Moves to top if previous_task_id is omitted.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            account: { type: 'string', description: 'Account id. Omit for default.' },
+                            task_list_id: { type: 'string', description: 'Task list ID.' },
+                            task_id: { type: 'string', description: 'Task ID to move.' },
+                            previous_task_id: { type: 'string', description: 'ID of the task to place this task after. Omit to move to top.' },
+                        },
+                        required: ['task_list_id', 'task_id'],
+                        additionalProperties: false,
+                    },
+                },
             ],
         }));
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1509,6 +1596,13 @@ class GmailMultiInboxServer {
                     case 'create_event': return await this.handleCreateEvent(args);
                     case 'update_event': return await this.handleUpdateEvent(args);
                     case 'delete_event': return await this.handleDeleteEvent(args);
+                    // Tasks
+                    case 'list_tasklists': return await this.handleListTaskLists(args);
+                    case 'list_tasks': return await this.handleListTasks(args);
+                    case 'add_task': return await this.handleAddTask(args);
+                    case 'complete_task': return await this.handleCompleteTask(args);
+                    case 'delete_task': return await this.handleDeleteTask(args);
+                    case 'move_task': return await this.handleMoveTask(args);
                     default:
                         throw new Error(`Unknown tool: ${name}`);
                 }
@@ -2924,6 +3018,125 @@ class GmailMultiInboxServer {
         await client.deleteCalendarEvent(valueToString(rawArgs.calendar_id), valueToString(rawArgs.event_id), rawArgs.send_notifications !== undefined ? valueToBoolean(rawArgs.send_notifications, true) : true);
         return textResult(`✅ Event ${valueToString(rawArgs.event_id)} deleted from calendar ${valueToString(rawArgs.calendar_id)} in account ${acc.id}.`);
     }
+    async handleListTaskLists(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const config = await this.loadConfig();
+        const targetAccounts = resolveReadAccounts(config, accountId);
+        const results = await Promise.all(targetAccounts.map(async (account) => {
+            try {
+                const client = await this.getClientForAccount(account);
+                const lists = await client.listTaskLists();
+                return { lists, error: null };
+            }
+            catch (error) {
+                const msg = error.message;
+                if (msg.includes('Insufficient Permission') || msg.includes('insufficientPermissions'))
+                    return { lists: [], error: null };
+                return { lists: [], error: `${account.id}: ${msg}` };
+            }
+        }));
+        const all = results.flatMap((r) => r.lists);
+        const errors = results.map((r) => r.error).filter((e) => Boolean(e));
+        const lines = [
+            '# Task Lists',
+            '',
+            `**Scope**: ${accountId ? `account ${accountId}` : `all enabled accounts (${targetAccounts.length})`}`,
+            '',
+        ];
+        if (all.length === 0)
+            lines.push('No task lists found.');
+        all.forEach((tl) => {
+            lines.push(`- **${tl.title}** (id: \`${tl.id}\`) — ${tl.accountEmail}`);
+        });
+        if (errors.length > 0) {
+            lines.push('');
+            lines.push('## Errors');
+            lines.push(errors.map((e) => `- ${e}`).join('\n'));
+        }
+        return textResult(lines.join('\n'));
+    }
+    async handleListTasks(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const taskListId = valueToString(rawArgs.task_list_id);
+        const includeCompleted = rawArgs.include_completed ? valueToBoolean(rawArgs.include_completed, false) : false;
+        const config = await this.loadConfig();
+        const targetAccounts = resolveReadAccounts(config, accountId);
+        const results = await Promise.all(targetAccounts.map(async (account) => {
+            try {
+                const client = await this.getClientForAccount(account);
+                const tasks = await client.listTasks(taskListId, includeCompleted);
+                return { tasks, error: null };
+            }
+            catch (error) {
+                const msg = error.message;
+                if (msg.includes('Insufficient Permission') || msg.includes('insufficientPermissions'))
+                    return { tasks: [], error: null };
+                return { tasks: [], error: `${account.id}: ${msg}` };
+            }
+        }));
+        const all = results.flatMap((r) => r.tasks);
+        const errors = results.map((r) => r.error).filter((e) => Boolean(e));
+        const lines = [`# Tasks in list \`${taskListId}\``, ''];
+        if (all.length === 0)
+            lines.push('No tasks found.');
+        for (const t of all) {
+            const status = t.status === 'completed' ? '✅' : '☐';
+            const due = t.due ? ` — due ${t.due.slice(0, 10)}` : '';
+            lines.push(`${status} **${t.title}** (id: \`${t.id}\`)${due}`);
+            if (t.notes)
+                lines.push(`  > ${t.notes}`);
+        }
+        if (errors.length > 0) {
+            lines.push('');
+            lines.push('## Errors');
+            lines.push(errors.map((e) => `- ${e}`).join('\n'));
+        }
+        return textResult(lines.join('\n'));
+    }
+    async handleAddTask(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const taskListId = valueToString(rawArgs.task_list_id);
+        const title = valueToString(rawArgs.title);
+        const notes = rawArgs.notes ? valueToString(rawArgs.notes) : undefined;
+        const due = rawArgs.due ? valueToString(rawArgs.due) : undefined;
+        const config = await this.loadConfig();
+        const acc = resolveWriteAccount(config, accountId);
+        const client = await this.getClientForAccount(acc);
+        const task = await client.addTask(taskListId, title, notes, due);
+        return textResult(`✅ Task created: **${task.title}** (id: \`${task.id}\`) in list \`${taskListId}\` for account ${acc.email}.`);
+    }
+    async handleCompleteTask(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const taskListId = valueToString(rawArgs.task_list_id);
+        const taskId = valueToString(rawArgs.task_id);
+        const config = await this.loadConfig();
+        const acc = resolveWriteAccount(config, accountId);
+        const client = await this.getClientForAccount(acc);
+        const task = await client.completeTask(taskListId, taskId);
+        return textResult(`✅ Task **${task.title}** marked as completed in account ${acc.email}.`);
+    }
+    async handleDeleteTask(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const taskListId = valueToString(rawArgs.task_list_id);
+        const taskId = valueToString(rawArgs.task_id);
+        const config = await this.loadConfig();
+        const acc = resolveWriteAccount(config, accountId);
+        const client = await this.getClientForAccount(acc);
+        await client.deleteTask(taskListId, taskId);
+        return textResult(`✅ Task \`${taskId}\` deleted from list \`${taskListId}\` in account ${acc.email}.`);
+    }
+    async handleMoveTask(rawArgs) {
+        const accountId = valueToString(rawArgs.account, '').trim() || undefined;
+        const taskListId = valueToString(rawArgs.task_list_id);
+        const taskId = valueToString(rawArgs.task_id);
+        const previousTaskId = rawArgs.previous_task_id ? valueToString(rawArgs.previous_task_id) : undefined;
+        const config = await this.loadConfig();
+        const acc = resolveWriteAccount(config, accountId);
+        const client = await this.getClientForAccount(acc);
+        const task = await client.moveTask(taskListId, taskId, previousTaskId);
+        const position = previousTaskId ? `after task \`${previousTaskId}\`` : 'to the top';
+        return textResult(`✅ Task **${task.title}** moved ${position} in list \`${taskListId}\` for account ${acc.email}.`);
+    }
     async connectTransport(transport) {
         await ensureConfigLayout(this.configRoot);
         await this.server.connect(transport);
@@ -2960,44 +3173,354 @@ async function runSseServer() {
             await Promise.allSettled([transport.close(), app.close()]);
         }));
     };
-    app.get('/', (_req, res) => {
-        res.status(200).type('text/plain').send('ghub SSE server');
+    app.use(express.json({ limit: '1mb' }));
+    app.use((req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID');
+        res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+        if (req.method === 'OPTIONS') {
+            res.status(204).end();
+            return;
+        }
+        next();
+    });
+    const SECRET_TOKEN = process.env.SECRET_TOKEN?.trim();
+    if (!SECRET_TOKEN) {
+        console.error('[ghub] WARNING: SECRET_TOKEN is not set. All endpoints are unprotected.');
+    }
+    const requireToken = (req, res, next) => {
+        if (!SECRET_TOKEN || req.method === 'OPTIONS') {
+            next();
+            return;
+        }
+        const token = (typeof req.query['token'] === 'string' ? req.query['token'] : '') ||
+            (req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
+        if (token !== SECRET_TOKEN) {
+            res.status(401).type('text/plain').send('Unauthorized');
+            return;
+        }
+        next();
+    };
+    const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ghub — Gmail MCP Server</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f0f;color:#e8e8e8;min-height:100vh;padding:40px 20px}
+  h1{font-size:1.4rem;font-weight:600;color:#fff;margin-bottom:4px}
+  .subtitle{color:#666;font-size:.85rem;margin-bottom:32px}
+  .card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:24px;max-width:600px;margin:0 auto 24px}
+  .card h2{font-size:.9rem;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.05em;margin-bottom:16px}
+  .account{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #222}
+  .account:last-child{border-bottom:none;padding-bottom:0}
+  .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0}
+  .dot.off{background:#555}
+  .acct-info{flex:1}
+  .acct-email{font-size:.95rem;color:#e8e8e8}
+  .acct-id{font-size:.75rem;color:#555;margin-top:2px}
+  .btn-rm{background:none;border:1px solid #333;color:#666;padding:4px 10px;border-radius:5px;cursor:pointer;font-size:.75rem}
+  .btn-rm:hover{border-color:#e55;color:#e55}
+  .empty{color:#555;font-size:.875rem;padding:8px 0}
+  label{display:block;font-size:.8rem;color:#888;margin-bottom:6px;margin-top:16px}
+  label:first-of-type{margin-top:0}
+  input,textarea{width:100%;background:#111;border:1px solid #2a2a2a;border-radius:6px;color:#e8e8e8;padding:10px 12px;font-size:.875rem;font-family:inherit;outline:none}
+  input:focus,textarea:focus{border-color:#4f46e5}
+  textarea{resize:vertical;font-family:'SF Mono',monospace;font-size:.75rem}
+  .btn{background:#4f46e5;color:#fff;border:none;border-radius:6px;padding:10px 20px;font-size:.875rem;font-weight:500;cursor:pointer;margin-top:16px;width:100%}
+  .btn:hover{background:#4338ca}
+  .btn-out{background:none;border:1px solid #4f46e5;color:#4f46e5}
+  .btn-out:hover{background:#4f46e5;color:#fff}
+  .step{display:none}
+  .step.active{display:block}
+  .auth-box{background:#111;border:1px solid #2a2a2a;border-radius:6px;padding:12px;margin-top:12px;word-break:break-all;font-size:.75rem;color:#888}
+  .auth-box a{color:#818cf8;text-decoration:none}
+  .auth-box a:hover{text-decoration:underline}
+  .notice{background:#1e1a00;border:1px solid #3a3000;border-radius:6px;padding:12px 14px;font-size:.8rem;color:#ccc;margin-top:12px;line-height:1.6}
+  .notice code{background:#2a2500;padding:1px 5px;border-radius:3px;font-size:.75rem;color:#fcd34d}
+  .msg{font-size:.8rem;margin-top:10px;display:none}
+  .msg.err{color:#f87171}
+  .msg.ok{color:#4ade80}
+  .sseurl{font-family:'SF Mono',monospace;background:#111;border:1px solid #2a2a2a;border-radius:6px;padding:10px 12px;font-size:.8rem;color:#818cf8;display:block;margin-top:4px;word-break:break-all}
+</style>
+</head>
+<body>
+<div style="max-width:600px;margin:0 auto">
+  <h1>ghub</h1>
+  <p class="subtitle">Gmail &amp; Google Workspace MCP Server</p>
+
+  <div class="card">
+    <h2>MCP Endpoint</h2>
+    <span class="sseurl" id="sseUrl"></span>
+    <script>document.getElementById('sseUrl').textContent = location.origin + '/sse';</script>
+  </div>
+
+  <div class="card">
+    <h2>Connected Accounts</h2>
+    <div id="accountsList"><p class="empty">Loading...</p></div>
+  </div>
+
+  <div class="card">
+    <h2>Add Account</h2>
+    <div class="step active" id="step1">
+      <label>Account ID <span style="color:#555">(letters, numbers, _ or - only)</span></label>
+      <input id="accountId" type="text" placeholder="e.g. personal" />
+      <label>Email Address</label>
+      <input id="email" type="email" placeholder="you@gmail.com" />
+      <label>credentials.json <span style="color:#555">(paste full file contents)</span></label>
+      <textarea id="credJson" rows="6" placeholder='{"installed":{"client_id":"..."}}'></textarea>
+      <button class="btn" onclick="beginAuth()">Start Authorization →</button>
+      <p class="msg err" id="err1"></p>
+    </div>
+    <div class="step" id="step2">
+      <p style="color:#aaa;font-size:.875rem;line-height:1.6">Click the link below to authorize access. After approving, your browser will redirect to a localhost URL that won't load — that's expected.</p>
+      <div class="auth-box"><a id="authLink" href="#" target="_blank">Open Google Authorization →</a></div>
+      <div class="notice">After approving, copy the <code>code</code> value from the URL you were redirected to.<br>It looks like: <code>http://localhost/?code=<strong>4/0AbCD...</strong>&amp;scope=...</code></div>
+      <label style="margin-top:16px">Authorization Code</label>
+      <input id="authCode" type="text" placeholder="4/0AbCD..." />
+      <button class="btn" onclick="finishAuth()">Complete Setup ✓</button>
+      <button class="btn btn-out" style="margin-top:8px" onclick="back()">← Start Over</button>
+      <p class="msg err" id="err2"></p>
+      <p class="msg ok" id="ok2"></p>
+    </div>
+  </div>
+</div>
+<script>
+const tok = new URLSearchParams(location.search).get('token') || '';
+const api = (path, opts) => fetch(path + (tok ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(tok) : ''), opts);
+
+let pendingId = '';
+
+function makeAccountRow(a) {
+  const row = document.createElement('div');
+  row.className = 'account';
+  const dot = document.createElement('div');
+  dot.className = 'dot' + (a.enabled ? '' : ' off');
+  const info = document.createElement('div');
+  info.className = 'acct-info';
+  const emailEl = document.createElement('div');
+  emailEl.className = 'acct-email';
+  emailEl.textContent = a.email;
+  const idEl = document.createElement('div');
+  idEl.className = 'acct-id';
+  idEl.textContent = a.id + (a.displayName ? ' · ' + a.displayName : '');
+  info.append(emailEl, idEl);
+  const rmBtn = document.createElement('button');
+  rmBtn.className = 'btn-rm';
+  rmBtn.textContent = 'Remove';
+  rmBtn.onclick = () => removeAccount(a.id);
+  row.append(dot, info, rmBtn);
+  return row;
+}
+
+async function loadAccounts() {
+  const el = document.getElementById('accountsList');
+  try {
+    const res = await api('/api/accounts');
+    const { accounts } = await res.json();
+    el.innerHTML = '';
+    if (!accounts.length) { el.innerHTML = '<p class="empty">No accounts connected yet.</p>'; return; }
+    accounts.forEach(a => el.appendChild(makeAccountRow(a)));
+  } catch { el.innerHTML = '<p class="empty">Failed to load accounts.</p>'; }
+}
+
+async function beginAuth() {
+  const id = document.getElementById('accountId').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const raw = document.getElementById('credJson').value.trim();
+  const errEl = document.getElementById('err1');
+  errEl.style.display = 'none';
+  if (!id || !email || !raw) { errEl.textContent = 'All fields are required.'; errEl.style.display = 'block'; return; }
+  let creds;
+  try { creds = JSON.parse(raw); } catch { errEl.textContent = 'Invalid JSON in credentials field.'; errEl.style.display = 'block'; return; }
+  try {
+    const res = await api('/api/accounts/begin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:id,email,credentials_json:creds})});
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || 'Server error.'; errEl.style.display = 'block'; return; }
+    pendingId = id;
+    document.getElementById('authLink').href = data.authUrl;
+    document.getElementById('step1').classList.remove('active');
+    document.getElementById('step2').classList.add('active');
+  } catch(e) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = 'block'; }
+}
+
+async function finishAuth() {
+  const code = document.getElementById('authCode').value.trim();
+  const errEl = document.getElementById('err2');
+  const okEl = document.getElementById('ok2');
+  errEl.style.display = 'none'; okEl.style.display = 'none';
+  if (!code) { errEl.textContent = 'Paste the authorization code first.'; errEl.style.display = 'block'; return; }
+  try {
+    const res = await api('/api/accounts/finish', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:pendingId,authorization_code:code})});
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || 'Server error.'; errEl.style.display = 'block'; return; }
+    okEl.textContent = '✓ ' + data.email + ' connected successfully!';
+    okEl.style.display = 'block';
+    setTimeout(() => { back(); loadAccounts(); }, 1500);
+  } catch(e) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = 'block'; }
+}
+
+async function removeAccount(id) {
+  if (!confirm('Remove account ' + id + '?')) return;
+  await api('/api/accounts/' + id, {method:'DELETE'});
+  loadAccounts();
+}
+
+function back() {
+  document.getElementById('step2').classList.remove('active');
+  document.getElementById('step1').classList.add('active');
+  document.getElementById('authCode').value = '';
+  document.getElementById('err2').style.display = 'none';
+  document.getElementById('ok2').style.display = 'none';
+}
+
+loadAccounts();
+</script>
+</body>
+</html>`;
+    app.get('/', requireToken, (_req, res) => {
+        res.status(200).type('text/html').send(DASHBOARD_HTML);
+    });
+    app.get('/api/accounts', requireToken, async (_req, res) => {
+        try {
+            const config = await loadAccountsConfig(getConfigRoot());
+            res.json({ accounts: config.accounts.map(a => ({ id: a.id, email: a.email, displayName: a.displayName, enabled: a.enabled })) });
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+    app.post('/api/accounts/begin', requireToken, async (req, res) => {
+        try {
+            const { account_id, email, credentials_json, display_name } = req.body;
+            if (!account_id || !email || !credentials_json) {
+                res.status(400).json({ error: 'account_id, email, and credentials_json are required.' });
+                return;
+            }
+            validateAccountId(String(account_id));
+            const configRoot = getConfigRoot();
+            await ensureConfigLayout(configRoot);
+            const defaultPaths = getDefaultAccountPaths(configRoot, String(account_id));
+            await fs.mkdir(defaultPaths.accountDir, { recursive: true });
+            await fs.writeFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials_json, null, 2)}\n`, 'utf8');
+            const { authUrl } = generateAuthUrlFromCredentials(credentials_json);
+            let config = await loadAccountsConfig(configRoot);
+            config = upsertAccount(config, {
+                id: String(account_id),
+                email: String(email),
+                displayName: display_name ? String(display_name) : undefined,
+                enabled: false,
+                credentialPath: defaultPaths.credentialsPath,
+                tokenPath: defaultPaths.tokenPath,
+            });
+            await saveAccountsConfig(configRoot, config);
+            res.json({ authUrl });
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+    app.post('/api/accounts/finish', requireToken, async (req, res) => {
+        try {
+            const { account_id, authorization_code } = req.body;
+            if (!account_id || !authorization_code) {
+                res.status(400).json({ error: 'account_id and authorization_code are required.' });
+                return;
+            }
+            const configRoot = getConfigRoot();
+            let config = await loadAccountsConfig(configRoot);
+            const account = getAccountOrThrow(config, String(account_id));
+            const paths = getAccountPaths(configRoot, account);
+            const credentials = await readCredentialsFile(paths.credentialsPath);
+            const tokens = await exchangeCodeForToken(credentials, String(authorization_code));
+            await fs.writeFile(paths.tokenPath, `${JSON.stringify(tokens, null, 2)}\n`, 'utf8');
+            config = upsertAccount(config, { ...account, enabled: true, credentialPath: paths.credentialsPath, tokenPath: paths.tokenPath });
+            await saveAccountsConfig(configRoot, config);
+            res.json({ email: account.email });
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+    app.delete('/api/accounts/:id', requireToken, async (req, res) => {
+        try {
+            const configRoot = getConfigRoot();
+            let config = await loadAccountsConfig(configRoot);
+            config = { ...config, accounts: config.accounts.filter(a => a.id !== req.params['id']) };
+            if (config.defaultAccount === req.params['id']) {
+                config = { ...config, defaultAccount: config.accounts[0]?.id };
+            }
+            await saveAccountsConfig(configRoot, config);
+            res.json({ ok: true });
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     });
     app.use((req, _res, next) => {
         console.error('[ghub] HTTP ' + req.method + ' ' + req.path);
         next();
     });
-    app.get('/sse', async (_req, res) => {
+    app.get('/health', (_req, res) => { res.status(200).send('ok'); });
+    // Return 404 (not 401) for OAuth discovery so Claude doesn't enter OAuth flow.
+    app.all([
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-protected-resource/sse',
+        '/.well-known/oauth-authorization-server',
+        '/register',
+    ], (_req, res) => {
+        res.status(404).end();
+    });
+    app.all('/sse', requireToken, async (req, res) => {
+        res.setHeader('X-Accel-Buffering', 'no');
+        const sessionId = typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : undefined;
+        console.error(`[ghub] /sse ${req.method} sessionId=${sessionId ?? 'none'} known=${sessionId ? sessions.has(sessionId) : 'n/a'}`);
+        if (sessionId && sessions.has(sessionId)) {
+            const { transport } = sessions.get(sessionId);
+            await transport.handleRequest(req, res, req.body);
+            return;
+        }
+        // Session ID provided but session not found (e.g. server restarted) — tell client to reinitialize
+        if (sessionId && !sessions.has(sessionId)) {
+            console.error('[ghub] Unknown session ID: ' + sessionId + ' — returning 404 so client reinitializes');
+            res.status(404).type('text/plain').send('Session not found. Please reinitialize.');
+            return;
+        }
+        if (req.method !== 'POST') {
+            console.error('[ghub] Non-POST init attempt, method=' + req.method);
+            res.status(400).type('text/plain').send('New sessions must be started with POST /sse');
+            return;
+        }
         const serverApp = new GmailMultiInboxServer();
-        const transport = new SSEServerTransport('/messages', res);
-        const sessionId = transport.sessionId;
-        sessions.set(sessionId, { app: serverApp, transport });
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (id) => {
+                sessions.set(id, { app: serverApp, transport });
+                console.error('[ghub] Session initialized: ' + id);
+            },
+        });
         transport.onclose = () => {
-            sessions.delete(sessionId);
+            if (transport.sessionId) {
+                console.error('[ghub] Session closed: ' + transport.sessionId);
+                sessions.delete(transport.sessionId);
+            }
+            serverApp.close().catch(() => { });
         };
         try {
             await serverApp.connectTransport(transport);
-            console.error('[ghub] SSE session started: ' + sessionId);
+            await transport.handleRequest(req, res, req.body);
         }
         catch (error) {
-            sessions.delete(sessionId);
-            if (!res.headersSent) {
-                res.status(500).type('text/plain');
-            }
-            res.end(error instanceof Error ? error.message : String(error));
+            console.error('[ghub] Session error: ' + error.message);
+            if (!res.headersSent)
+                res.status(500).type('text/plain').send(error.message);
         }
-    });
-    app.post('/messages', async (req, res) => {
-        const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
-        const session = sessions.get(sessionId);
-        if (!session) {
-            res.status(404).type('text/plain').send('Unknown SSE session');
-            return;
-        }
-        await session.transport.handlePostMessage(req, res);
     });
     const httpServer = app.listen(port, () => {
-        console.error('[ghub] Running on SSE at port ' + port + '. Routes: GET /sse, POST /messages');
+        console.error('[ghub] Running on Streamable HTTP at port ' + port + '. Route: /mcp');
     });
     const shutdown = async () => {
         await closeAll();

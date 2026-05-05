@@ -1,5 +1,5 @@
 import { OAuth2Client, type Credentials } from 'google-auth-library';
-import { google, type calendar_v3, type docs_v1, type drive_v3, type gmail_v1, type sheets_v4 } from 'googleapis';
+import { google, type calendar_v3, type docs_v1, type drive_v3, type gmail_v1, type sheets_v4, type tasks_v1 } from 'googleapis';
 import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { AccountConfig, type AccountPaths, getAccountPaths } from './config.js';
@@ -24,12 +24,16 @@ export const DOCS_SCOPE =
 export const CALENDAR_SCOPE =
   'https://www.googleapis.com/auth/calendar' as const;
 
+export const TASKS_SCOPE =
+  'https://www.googleapis.com/auth/tasks' as const;
+
 export const GOOGLE_ACCOUNT_SCOPES = [
   ...GMAIL_SCOPES,
   DRIVE_FULL_SCOPE,
   SHEETS_SCOPE,
   DOCS_SCOPE,
   CALENDAR_SCOPE,
+  TASKS_SCOPE,
 ] as const;
 
 export interface AttachmentMetadata {
@@ -150,6 +154,25 @@ export interface CalendarEvent {
 
 interface OAuthClientOptions {
   credentials: unknown;
+}
+
+export interface TaskList {
+  id: string;
+  title: string;
+  accountId: string;
+  accountEmail: string;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  notes?: string;
+  status: 'needsAction' | 'completed';
+  due?: string;
+  completed?: string;
+  taskListId: string;
+  accountId: string;
+  accountEmail: string;
 }
 
 export interface EmailAttachment {
@@ -611,6 +634,7 @@ export class GmailAccountClient {
   private readonly sheets: sheets_v4.Sheets;
   private readonly docs: docs_v1.Docs;
   private readonly calendar: calendar_v3.Calendar;
+  private readonly tasks: tasks_v1.Tasks;
 
   private constructor(
     account: AccountConfig,
@@ -620,6 +644,7 @@ export class GmailAccountClient {
     sheets: sheets_v4.Sheets,
     docs: docs_v1.Docs,
     calendar: calendar_v3.Calendar,
+    tasks: tasks_v1.Tasks,
   ) {
     this.account = account;
     this.paths = paths;
@@ -628,6 +653,7 @@ export class GmailAccountClient {
     this.sheets = sheets;
     this.docs = docs;
     this.calendar = calendar;
+    this.tasks = tasks;
   }
 
   static async create(configRoot: string, account: AccountConfig): Promise<GmailAccountClient> {
@@ -663,7 +689,8 @@ export class GmailAccountClient {
     const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
     const docs = google.docs({ version: 'v1', auth: oauth2Client });
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-    return new GmailAccountClient(account, paths, gmail, drive, sheets, docs, calendar);
+    const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+    return new GmailAccountClient(account, paths, gmail, drive, sheets, docs, calendar, tasks);
   }
 
   async getProfileEmail(): Promise<string> {
@@ -2072,6 +2099,104 @@ export class GmailAccountClient {
       conferenceData: event.conferenceData?.entryPoints?.length
         ? { entryPoints: event.conferenceData.entryPoints.map((ep) => ({ uri: ep.uri ?? '', entryPointType: ep.entryPointType ?? '' })) }
         : undefined,
+      accountId: this.account.id,
+      accountEmail: this.account.email,
+    };
+  }
+
+  async listTaskLists(): Promise<TaskList[]> {
+    const response = await this.tasks.tasklists.list({ maxResults: 100 });
+    return (response.data.items ?? []).map((tl) => ({
+      id: tl.id ?? '',
+      title: tl.title ?? '',
+      accountId: this.account.id,
+      accountEmail: this.account.email,
+    }));
+  }
+
+  async listTasks(taskListId: string, includeCompleted = false): Promise<Task[]> {
+    const response = await this.tasks.tasks.list({
+      tasklist: taskListId,
+      showCompleted: includeCompleted,
+      showHidden: includeCompleted,
+      maxResults: 100,
+    });
+    return (response.data.items ?? []).map((t) => ({
+      id: t.id ?? '',
+      title: t.title ?? '',
+      notes: t.notes ?? undefined,
+      status: (t.status as 'needsAction' | 'completed') ?? 'needsAction',
+      due: t.due ?? undefined,
+      completed: t.completed ?? undefined,
+      taskListId,
+      accountId: this.account.id,
+      accountEmail: this.account.email,
+    }));
+  }
+
+  async addTask(taskListId: string, title: string, notes?: string, due?: string): Promise<Task> {
+    const response = await this.tasks.tasks.insert({
+      tasklist: taskListId,
+      requestBody: {
+        title,
+        notes,
+        due,
+        status: 'needsAction',
+      },
+    });
+    const t = response.data;
+    return {
+      id: t.id ?? '',
+      title: t.title ?? '',
+      notes: t.notes ?? undefined,
+      status: (t.status as 'needsAction' | 'completed') ?? 'needsAction',
+      due: t.due ?? undefined,
+      completed: t.completed ?? undefined,
+      taskListId,
+      accountId: this.account.id,
+      accountEmail: this.account.email,
+    };
+  }
+
+  async completeTask(taskListId: string, taskId: string): Promise<Task> {
+    const response = await this.tasks.tasks.patch({
+      tasklist: taskListId,
+      task: taskId,
+      requestBody: { status: 'completed' },
+    });
+    const t = response.data;
+    return {
+      id: t.id ?? '',
+      title: t.title ?? '',
+      notes: t.notes ?? undefined,
+      status: (t.status as 'needsAction' | 'completed') ?? 'completed',
+      due: t.due ?? undefined,
+      completed: t.completed ?? undefined,
+      taskListId,
+      accountId: this.account.id,
+      accountEmail: this.account.email,
+    };
+  }
+
+  async deleteTask(taskListId: string, taskId: string): Promise<void> {
+    await this.tasks.tasks.delete({ tasklist: taskListId, task: taskId });
+  }
+
+  async moveTask(taskListId: string, taskId: string, previousTaskId?: string): Promise<Task> {
+    const response = await this.tasks.tasks.move({
+      tasklist: taskListId,
+      task: taskId,
+      previous: previousTaskId,
+    });
+    const t = response.data;
+    return {
+      id: t.id ?? '',
+      title: t.title ?? '',
+      notes: t.notes ?? undefined,
+      status: (t.status as 'needsAction' | 'completed') ?? 'needsAction',
+      due: t.due ?? undefined,
+      completed: t.completed ?? undefined,
+      taskListId,
       accountId: this.account.id,
       accountEmail: this.account.email,
     };

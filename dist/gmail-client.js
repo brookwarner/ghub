@@ -12,12 +12,14 @@ export const DRIVE_FULL_SCOPE = 'https://www.googleapis.com/auth/drive';
 export const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 export const DOCS_SCOPE = 'https://www.googleapis.com/auth/documents';
 export const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar';
+export const TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks';
 export const GOOGLE_ACCOUNT_SCOPES = [
     ...GMAIL_SCOPES,
     DRIVE_FULL_SCOPE,
     SHEETS_SCOPE,
     DOCS_SCOPE,
     CALENDAR_SCOPE,
+    TASKS_SCOPE,
 ];
 function decodeBase64Url(value) {
     const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
@@ -340,7 +342,8 @@ export class GmailAccountClient {
     sheets;
     docs;
     calendar;
-    constructor(account, paths, gmail, drive, sheets, docs, calendar) {
+    tasks;
+    constructor(account, paths, gmail, drive, sheets, docs, calendar, tasks) {
         this.account = account;
         this.paths = paths;
         this.gmail = gmail;
@@ -348,6 +351,7 @@ export class GmailAccountClient {
         this.sheets = sheets;
         this.docs = docs;
         this.calendar = calendar;
+        this.tasks = tasks;
     }
     static async create(configRoot, account) {
         const paths = getAccountPaths(configRoot, account);
@@ -374,7 +378,8 @@ export class GmailAccountClient {
         const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
         const docs = google.docs({ version: 'v1', auth: oauth2Client });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-        return new GmailAccountClient(account, paths, gmail, drive, sheets, docs, calendar);
+        const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+        return new GmailAccountClient(account, paths, gmail, drive, sheets, docs, calendar, tasks);
     }
     async getProfileEmail() {
         const profile = await this.gmail.users.getProfile({ userId: 'me' });
@@ -1558,6 +1563,98 @@ export class GmailAccountClient {
             conferenceData: event.conferenceData?.entryPoints?.length
                 ? { entryPoints: event.conferenceData.entryPoints.map((ep) => ({ uri: ep.uri ?? '', entryPointType: ep.entryPointType ?? '' })) }
                 : undefined,
+            accountId: this.account.id,
+            accountEmail: this.account.email,
+        };
+    }
+    async listTaskLists() {
+        const response = await this.tasks.tasklists.list({ maxResults: 100 });
+        return (response.data.items ?? []).map((tl) => ({
+            id: tl.id ?? '',
+            title: tl.title ?? '',
+            accountId: this.account.id,
+            accountEmail: this.account.email,
+        }));
+    }
+    async listTasks(taskListId, includeCompleted = false) {
+        const response = await this.tasks.tasks.list({
+            tasklist: taskListId,
+            showCompleted: includeCompleted,
+            showHidden: includeCompleted,
+            maxResults: 100,
+        });
+        return (response.data.items ?? []).map((t) => ({
+            id: t.id ?? '',
+            title: t.title ?? '',
+            notes: t.notes ?? undefined,
+            status: t.status ?? 'needsAction',
+            due: t.due ?? undefined,
+            completed: t.completed ?? undefined,
+            taskListId,
+            accountId: this.account.id,
+            accountEmail: this.account.email,
+        }));
+    }
+    async addTask(taskListId, title, notes, due) {
+        const response = await this.tasks.tasks.insert({
+            tasklist: taskListId,
+            requestBody: {
+                title,
+                notes,
+                due,
+                status: 'needsAction',
+            },
+        });
+        const t = response.data;
+        return {
+            id: t.id ?? '',
+            title: t.title ?? '',
+            notes: t.notes ?? undefined,
+            status: t.status ?? 'needsAction',
+            due: t.due ?? undefined,
+            completed: t.completed ?? undefined,
+            taskListId,
+            accountId: this.account.id,
+            accountEmail: this.account.email,
+        };
+    }
+    async completeTask(taskListId, taskId) {
+        const response = await this.tasks.tasks.patch({
+            tasklist: taskListId,
+            task: taskId,
+            requestBody: { status: 'completed' },
+        });
+        const t = response.data;
+        return {
+            id: t.id ?? '',
+            title: t.title ?? '',
+            notes: t.notes ?? undefined,
+            status: t.status ?? 'completed',
+            due: t.due ?? undefined,
+            completed: t.completed ?? undefined,
+            taskListId,
+            accountId: this.account.id,
+            accountEmail: this.account.email,
+        };
+    }
+    async deleteTask(taskListId, taskId) {
+        await this.tasks.tasks.delete({ tasklist: taskListId, task: taskId });
+    }
+    async moveTask(taskListId, taskId, previousTaskId) {
+        const response = await this.tasks.tasks.move({
+            tasklist: taskListId,
+            task: taskId,
+            previous: previousTaskId,
+        });
+        const t = response.data;
+        return {
+            id: t.id ?? '',
+            title: t.title ?? '',
+            notes: t.notes ?? undefined,
+            status: t.status ?? 'needsAction',
+            due: t.due ?? undefined,
+            completed: t.completed ?? undefined,
+            taskListId,
             accountId: this.account.id,
             accountEmail: this.account.email,
         };
