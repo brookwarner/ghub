@@ -46,10 +46,7 @@ jobs:
             git reset --hard origin/main
 
             echo "Installing dependencies..."
-            npm install --ignore-scripts
-
-            echo "Building..."
-            npm run build
+            npm install --ignore-scripts --omit=dev
 
             echo "Starting PM2..."
             mkdir -p /var/data/multi-gmail
