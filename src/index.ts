@@ -4062,6 +4062,9 @@ async function runSseServer(): Promise<void> {
 
   app.use(express.json({ limit: '1mb' }));
 
+  // Serve ACME challenge files for Let's Encrypt cert renewal (no auth required)
+  app.use('/.well-known', express.static('/var/www/html/brookwarner-website/.well-known', { dotfiles: 'allow' }));
+
   const allowedOrigins = new Set(
     (process.env.ALLOWED_ORIGINS ?? '')
       .split(',')
