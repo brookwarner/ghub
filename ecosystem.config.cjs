@@ -7,6 +7,7 @@ module.exports = {
       NODE_ENV: 'production',
       PORT: '8080',
       GMAILMCPCONFIG_DIR: '/var/data/multi-gmail',
+      SECRET_TOKEN: process.env.SECRET_TOKEN || '',
     },
   }],
 };
