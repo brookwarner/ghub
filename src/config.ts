@@ -2,7 +2,14 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const SCOPE_GROUPS = ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'] as const;
+export const SCOPE_GROUPS = [
+  'mail.read', 'mail.send', 'mail.manage', 'mail.settings',
+  'drive.read', 'drive.write',
+  'sheets.read', 'sheets.write',
+  'docs.read', 'docs.write',
+  'calendar.read', 'calendar.write',
+  'tasks.read', 'tasks.write',
+] as const;
 export type ScopeGroup = typeof SCOPE_GROUPS[number];
 
 export interface AccountConfig {

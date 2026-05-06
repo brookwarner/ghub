@@ -1,7 +1,14 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-export const SCOPE_GROUPS = ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'];
+export const SCOPE_GROUPS = [
+    'mail.read', 'mail.send', 'mail.manage', 'mail.settings',
+    'drive.read', 'drive.write',
+    'sheets.read', 'sheets.write',
+    'docs.read', 'docs.write',
+    'calendar.read', 'calendar.write',
+    'tasks.read', 'tasks.write',
+];
 const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.gmail-multi-mcp');
 const ACCOUNT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 function expandHome(inputPath) {

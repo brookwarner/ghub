@@ -46,7 +46,10 @@ jobs:
             git reset --hard origin/main
 
             echo "Installing dependencies..."
-            npm install --omit=dev --ignore-scripts
+            npm install --ignore-scripts
+
+            echo "Building..."
+            npm run build
 
             echo "Starting PM2..."
             mkdir -p /var/data/multi-gmail
@@ -62,4 +65,12 @@ jobs:
           DO_USERNAME: ${{ secrets.DO_USERNAME }}
           DO_HOST: ${{ secrets.DO_HOST }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" "curl -sf http://localhost:8080/health"
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" "
+            for i in 1 2 3 4 5; do
+              curl -sf http://localhost:8080/health && exit 0
+              echo \"Attempt \$i failed, retrying in 3s...\"
+              sleep 3
+            done
+            echo 'Health check failed after 5 attempts'
+            exit 1
+          "

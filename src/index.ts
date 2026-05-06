@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import express, { type Request, type Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
@@ -426,8 +427,26 @@ function valueToStringArray(value: unknown): string[] {
   return value.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
 }
 
+function getAttachmentAllowDir(): string | null {
+  const raw = process.env.ATTACHMENT_DIR?.trim();
+  if (!raw) return null;
+  return path.resolve(raw);
+}
+
+function assertPathInsideAllowDir(filePath: string, allowDir: string): void {
+  const resolved = path.resolve(filePath);
+  const rel = path.relative(allowDir, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(
+      `Attachment path "${filePath}" is outside the allowed directory (ATTACHMENT_DIR=${allowDir}).`
+    );
+  }
+}
+
 function valueToAttachmentArray(value: unknown): OutgoingEmailAttachmentArgs[] {
   if (!Array.isArray(value)) return [];
+
+  const allowDir = getAttachmentAllowDir();
 
   return value.flatMap((item) => {
     if (!item || typeof item !== 'object') return [];
@@ -435,9 +454,16 @@ function valueToAttachmentArray(value: unknown): OutgoingEmailAttachmentArgs[] {
     const filePath = valueToString(candidate.path).trim();
     if (!filePath) return [];
 
+    if (!allowDir) {
+      throw new Error(
+        'Attachments are disabled: set ATTACHMENT_DIR to an absolute directory path to allow file attachments.'
+      );
+    }
+    assertPathInsideAllowDir(filePath, allowDir);
+
     return [
       {
-        path: filePath,
+        path: path.resolve(filePath),
         filename: valueToString(candidate.filename, '').trim() || undefined,
         content_type: valueToString(candidate.content_type, '').trim() || undefined,
       },
@@ -1294,8 +1320,18 @@ class GmailMultiInboxServer {
               },
               scope_groups: {
                 type: 'array',
-                items: { type: 'string', enum: ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'] },
-                description: 'Which Google API scopes to request. Omit for all. Example: ["mail","calendar"]',
+                items: {
+                  type: 'string',
+                  enum: [
+                    'mail.read', 'mail.send', 'mail.manage', 'mail.settings',
+                    'drive.read', 'drive.write',
+                    'sheets.read', 'sheets.write',
+                    'docs.read', 'docs.write',
+                    'calendar.read', 'calendar.write',
+                    'tasks.read', 'tasks.write',
+                  ],
+                },
+                description: 'Which Google API scopes to request. Omit for all. Example: ["mail.read","calendar.read","calendar.write"]',
               },
             },
             required: ['account_id', 'email'],
@@ -4026,11 +4062,22 @@ async function runSseServer(): Promise<void> {
 
   app.use(express.json({ limit: '1mb' }));
 
+  const allowedOrigins = new Set(
+    (process.env.ALLOWED_ORIGINS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+
   app.use((req: Request, res: Response, next: () => void) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID');
-    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID');
+      res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+    }
     if (req.method === 'OPTIONS') { res.status(204).end(); return; }
     next();
   });
@@ -4039,12 +4086,36 @@ async function runSseServer(): Promise<void> {
   if (!SECRET_TOKEN) {
     console.error('[ghub] WARNING: SECRET_TOKEN is not set. All endpoints are unprotected.');
   }
+  const SECRET_TOKEN_BUF = SECRET_TOKEN ? Buffer.from(SECRET_TOKEN, 'utf8') : null;
+
+  const tokensEqual = (provided: string): boolean => {
+    if (!SECRET_TOKEN_BUF) return true;
+    const providedBuf = Buffer.from(provided, 'utf8');
+    if (providedBuf.length !== SECRET_TOKEN_BUF.length) return false;
+    return timingSafeEqual(providedBuf, SECRET_TOKEN_BUF);
+  };
 
   const requireToken = (req: Request, res: Response, next: () => void): void => {
     if (!SECRET_TOKEN || req.method === 'OPTIONS') { next(); return; }
-    const token = (typeof req.query['token'] === 'string' ? req.query['token'] : '') ||
-      (req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
-    if (token !== SECRET_TOKEN) {
+    const header = req.headers['authorization'];
+    const token = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '') : '';
+    if (!token || !tokensEqual(token)) {
+      res.status(401).type('text/plain').send('Unauthorized');
+      return;
+    }
+    next();
+  };
+
+  // Dashboard bootstrap: allow ?token= here so the page can load from a bookmark.
+  // The dashboard JS strips the token from the URL and sends it via Authorization
+  // for all subsequent API calls.
+  const requireTokenBootstrap = (req: Request, res: Response, next: () => void): void => {
+    if (!SECRET_TOKEN || req.method === 'OPTIONS') { next(); return; }
+    const queryToken = typeof req.query['token'] === 'string' ? req.query['token'] : '';
+    const header = req.headers['authorization'];
+    const headerToken = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '') : '';
+    const token = headerToken || queryToken;
+    if (!token || !tokensEqual(token)) {
       res.status(401).type('text/plain').send('Unauthorized');
       return;
     }
@@ -4121,14 +4192,28 @@ async function runSseServer(): Promise<void> {
       <input id="email" type="email" placeholder="you@gmail.com" />
       <label>credentials.json <span style="color:#555">(paste full file contents)</span></label>
       <textarea id="credJson" rows="6" placeholder='{"installed":{"client_id":"..."}}'></textarea>
-      <label style="margin-top:12px">Access Scopes <span style="color:#555">(uncheck what you don't need)</span></label>
-      <div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:4px">
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail" checked> Mail</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_drive"> Drive</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_sheets"> Sheets</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_docs"> Docs</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_calendar"> Calendar</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_tasks"> Tasks</label>
+      <label style="margin-top:12px">Access Scopes <span style="color:#555">(check only what you need)</span></label>
+      <div style="margin-top:6px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 16px">
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-bottom:2px">Mail</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail.read" checked> Read emails &amp; labels</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail.send"> Send &amp; draft emails</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail.manage"> Modify labels &amp; trash</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail.settings"> Filters &amp; block senders</label>
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-top:6px;margin-bottom:2px">Drive</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_drive.read"> Read files</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_drive.write"> Upload &amp; modify files</label>
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-top:6px;margin-bottom:2px">Sheets</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_sheets.read"> Read spreadsheets</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_sheets.write"> Edit spreadsheets</label>
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-top:6px;margin-bottom:2px">Docs</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_docs.read"> Read documents</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_docs.write"> Edit documents</label>
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-top:6px;margin-bottom:2px">Calendar</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_calendar.read"> Read calendars &amp; events</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_calendar.write"> Create &amp; edit events</label>
+        <div style="font-size:.75rem;color:#888;grid-column:1/-1;margin-top:6px;margin-bottom:2px">Tasks</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_tasks.read"> Read tasks</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_tasks.write"> Add &amp; complete tasks</label>
       </div>
       <button class="btn" onclick="beginAuth()">Start Authorization →</button>
       <p class="msg err" id="err1"></p>
@@ -4148,7 +4233,17 @@ async function runSseServer(): Promise<void> {
 </div>
 <script>
 const tok = new URLSearchParams(location.search).get('token') || '';
-const api = (path, opts) => fetch(path + (tok ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(tok) : ''), opts);
+if (tok && location.search.includes('token=')) {
+  // Strip token from URL so it doesn't sit in browser history / referer headers.
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+const api = (path, opts) => {
+  const o = Object.assign({}, opts || {});
+  const headers = new Headers(o.headers || {});
+  if (tok) headers.set('Authorization', 'Bearer ' + tok);
+  o.headers = headers;
+  return fetch(path, o);
+};
 
 let pendingId = '';
 
@@ -4194,8 +4289,8 @@ async function beginAuth() {
   if (!id || !email || !raw) { errEl.textContent = 'All fields are required.'; errEl.style.display = 'block'; return; }
   let creds;
   try { creds = JSON.parse(raw); } catch { errEl.textContent = 'Invalid JSON in credentials field.'; errEl.style.display = 'block'; return; }
-  const allGroups = ['mail','drive','sheets','docs','calendar','tasks'];
-  const scope_groups = allGroups.filter(g => document.getElementById('scope_' + g).checked);
+  const allGroups = ['mail.read','mail.send','mail.manage','mail.settings','drive.read','drive.write','sheets.read','sheets.write','docs.read','docs.write','calendar.read','calendar.write','tasks.read','tasks.write'];
+  const scope_groups = allGroups.filter(g => document.getElementById('scope_' + g)?.checked);
   if (!scope_groups.length) { errEl.textContent = 'Select at least one scope.'; errEl.style.display = 'block'; return; }
   try {
     const res = await api('/api/accounts/begin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:id,email,credentials_json:creds,scope_groups})});
@@ -4243,7 +4338,7 @@ loadAccounts();
 </body>
 </html>`;
 
-  app.get('/', requireToken, (_req: Request, res: Response) => {
+  app.get('/', requireTokenBootstrap, (_req: Request, res: Response) => {
     res.status(200).type('text/html').send(DASHBOARD_HTML);
   });
 
