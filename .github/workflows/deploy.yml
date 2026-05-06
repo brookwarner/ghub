@@ -58,12 +58,8 @@ jobs:
           SSHEOF
 
       - name: Verify deployment
+        env:
+          DO_USERNAME: ${{ secrets.DO_USERNAME }}
+          DO_HOST: ${{ secrets.DO_HOST }}
         run: |
-          sleep 5
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://mcp.brookwarner.com/health || echo "000")
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "Health check passed (HTTP $HTTP_STATUS)"
-          else
-            echo "Health check returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
+          ssh -i ~/.ssh/deploy_key "$DO_USERNAME@$DO_HOST" "curl -sf http://localhost:8080/health"
