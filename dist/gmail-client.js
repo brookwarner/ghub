@@ -261,11 +261,29 @@ export async function buildOAuthClientFromCredentialsFile(credentialsPath) {
     const credentials = await readCredentialsFile(credentialsPath);
     return createOAuthClientFromCredentials({ credentials });
 }
-export function generateAuthUrlFromCredentials(credentials) {
+export function scopesForGroups(groups) {
+    if (!groups || groups.length === 0)
+        return [...GOOGLE_ACCOUNT_SCOPES];
+    const scopes = [];
+    if (groups.includes('mail'))
+        scopes.push(...GMAIL_SCOPES);
+    if (groups.includes('drive'))
+        scopes.push(DRIVE_FULL_SCOPE);
+    if (groups.includes('sheets'))
+        scopes.push(SHEETS_SCOPE);
+    if (groups.includes('docs'))
+        scopes.push(DOCS_SCOPE);
+    if (groups.includes('calendar'))
+        scopes.push(CALENDAR_SCOPE);
+    if (groups.includes('tasks'))
+        scopes.push(TASKS_SCOPE);
+    return scopes;
+}
+export function generateAuthUrlFromCredentials(credentials, scopeGroups) {
     const oauth2Client = createOAuthClientFromCredentials({ credentials });
     const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
-        scope: [...GOOGLE_ACCOUNT_SCOPES],
+        scope: scopesForGroups(scopeGroups),
         prompt: 'consent',
     });
     return { oauth2Client, authUrl };
@@ -353,6 +371,31 @@ export class GmailAccountClient {
         this.calendar = calendar;
         this.tasks = tasks;
     }
+    requireDrive() {
+        if (!this.drive)
+            throw new Error(`Account "${this.account.id}" does not have Drive access enabled.`);
+        return this.drive;
+    }
+    requireSheets() {
+        if (!this.sheets)
+            throw new Error(`Account "${this.account.id}" does not have Sheets access enabled.`);
+        return this.sheets;
+    }
+    requireDocs() {
+        if (!this.docs)
+            throw new Error(`Account "${this.account.id}" does not have Docs access enabled.`);
+        return this.docs;
+    }
+    requireCalendar() {
+        if (!this.calendar)
+            throw new Error(`Account "${this.account.id}" does not have Calendar access enabled.`);
+        return this.calendar;
+    }
+    requireTasks() {
+        if (!this.tasks)
+            throw new Error(`Account "${this.account.id}" does not have Tasks access enabled.`);
+        return this.tasks;
+    }
     static async create(configRoot, account) {
         const paths = getAccountPaths(configRoot, account);
         const oauth2Client = await buildOAuthClientFromCredentialsFile(paths.credentialsPath);
@@ -373,12 +416,14 @@ export class GmailAccountClient {
                 console.error(`[ghub] Failed to persist refreshed token for account ${account.id}:`, error);
             });
         });
+        const groups = account.scopeGroups;
+        const has = (g) => !groups || groups.includes(g);
         const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-        const drive = google.drive({ version: 'v3', auth: oauth2Client });
-        const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
-        const docs = google.docs({ version: 'v1', auth: oauth2Client });
-        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-        const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+        const drive = has('drive') ? google.drive({ version: 'v3', auth: oauth2Client }) : null;
+        const sheets = has('sheets') ? google.sheets({ version: 'v4', auth: oauth2Client }) : null;
+        const docs = has('docs') ? google.docs({ version: 'v1', auth: oauth2Client }) : null;
+        const calendar = has('calendar') ? google.calendar({ version: 'v3', auth: oauth2Client }) : null;
+        const tasks = has('tasks') ? google.tasks({ version: 'v1', auth: oauth2Client }) : null;
         return new GmailAccountClient(account, paths, gmail, drive, sheets, docs, calendar, tasks);
     }
     async getProfileEmail() {
@@ -400,7 +445,7 @@ export class GmailAccountClient {
     async searchDriveFiles(query, maxResults) {
         const boundedMax = Math.max(1, Math.min(maxResults, 500));
         try {
-            const response = await this.drive.files.list({
+            const response = await this.requireDrive().files.list({
                 q: buildDriveSearchQuery(query),
                 pageSize: boundedMax,
                 includeItemsFromAllDrives: true,
@@ -835,7 +880,7 @@ export class GmailAccountClient {
             parts.push(`(name contains '${esc}' or fullText contains '${esc}')`);
         }
         try {
-            const response = await this.drive.files.list({
+            const response = await this.requireDrive().files.list({
                 q: parts.join(' and '),
                 pageSize: Math.max(1, Math.min(options.maxResults ?? 25, 500)),
                 pageToken: options.pageToken,
@@ -866,7 +911,7 @@ export class GmailAccountClient {
         if (!fileId?.trim())
             throw new Error('file_id is required.');
         try {
-            const response = await this.drive.files.get({
+            const response = await this.requireDrive().files.get({
                 fileId: fileId.trim(),
                 supportsAllDrives: true,
                 fields: 'id,name,mimeType,modifiedTime,createdTime,size,parents,owners(displayName,emailAddress),webViewLink,trashed,starred,shared,exportLinks',
@@ -901,14 +946,14 @@ export class GmailAccountClient {
         const wsExport = WORKSPACE_EXPORT_MAP[meta.mimeType];
         try {
             if (wsExport) {
-                const response = await this.drive.files.export({ fileId: fileId.trim(), mimeType: wsExport.exportMime }, { responseType: 'arraybuffer' });
+                const response = await this.requireDrive().files.export({ fileId: fileId.trim(), mimeType: wsExport.exportMime }, { responseType: 'arraybuffer' });
                 return {
                     bytes: Buffer.from(response.data),
                     contentType: wsExport.contentType,
                     filename: `${meta.name}${wsExport.ext}`,
                 };
             }
-            const response = await this.drive.files.get({ fileId: fileId.trim(), alt: 'media', supportsAllDrives: true }, { responseType: 'arraybuffer' });
+            const response = await this.requireDrive().files.get({ fileId: fileId.trim(), alt: 'media', supportsAllDrives: true }, { responseType: 'arraybuffer' });
             return {
                 bytes: Buffer.from(response.data),
                 contentType: meta.mimeType,
@@ -929,7 +974,7 @@ export class GmailAccountClient {
         if (input.folderId?.trim())
             requestBody.parents = [input.folderId.trim()];
         try {
-            const response = await this.drive.files.create({
+            const response = await this.requireDrive().files.create({
                 supportsAllDrives: true,
                 requestBody,
                 media: { mimeType, body: createReadStream(localPath) },
@@ -967,7 +1012,7 @@ export class GmailAccountClient {
         if (parentId?.trim())
             requestBody.parents = [parentId.trim()];
         try {
-            const response = await this.drive.files.create({
+            const response = await this.requireDrive().files.create({
                 supportsAllDrives: true,
                 requestBody,
                 fields: 'id,name,mimeType,modifiedTime,webViewLink,owners(displayName,emailAddress)',
@@ -999,7 +1044,7 @@ export class GmailAccountClient {
         if (updates.description !== undefined)
             requestBody.description = updates.description;
         try {
-            const response = await this.drive.files.update({
+            const response = await this.requireDrive().files.update({
                 fileId: fileId.trim(),
                 supportsAllDrives: true,
                 addParents: updates.addParents?.trim() || undefined,
@@ -1027,7 +1072,7 @@ export class GmailAccountClient {
         if (!fileId?.trim())
             throw new Error('file_id is required.');
         try {
-            await this.drive.files.update({
+            await this.requireDrive().files.update({
                 fileId: fileId.trim(),
                 supportsAllDrives: true,
                 requestBody: { trashed: true },
@@ -1041,7 +1086,7 @@ export class GmailAccountClient {
         if (!fileId?.trim())
             throw new Error('file_id is required.');
         try {
-            const response = await this.drive.permissions.create({
+            const response = await this.requireDrive().permissions.create({
                 fileId: fileId.trim(),
                 supportsAllDrives: true,
                 sendNotificationEmail: input.sendNotification ?? true,
@@ -1058,7 +1103,7 @@ export class GmailAccountClient {
     async getSheetsMetadata(spreadsheetId) {
         if (!spreadsheetId?.trim())
             throw new Error('spreadsheet_id is required.');
-        const response = await this.sheets.spreadsheets.get({
+        const response = await this.requireSheets().spreadsheets.get({
             spreadsheetId: spreadsheetId.trim(),
             fields: 'spreadsheetId,spreadsheetUrl,properties/title,sheets(properties(sheetId,title,index,gridProperties))',
         });
@@ -1080,7 +1125,7 @@ export class GmailAccountClient {
             throw new Error('spreadsheet_id is required.');
         if (!range?.trim())
             throw new Error('range is required.');
-        const response = await this.sheets.spreadsheets.values.get({
+        const response = await this.requireSheets().spreadsheets.values.get({
             spreadsheetId: spreadsheetId.trim(),
             range: range.trim(),
             valueRenderOption,
@@ -1095,7 +1140,7 @@ export class GmailAccountClient {
             throw new Error('spreadsheet_id is required.');
         if (!range?.trim())
             throw new Error('range is required.');
-        const response = await this.sheets.spreadsheets.values.update({
+        const response = await this.requireSheets().spreadsheets.values.update({
             spreadsheetId: spreadsheetId.trim(),
             range: range.trim(),
             valueInputOption,
@@ -1112,7 +1157,7 @@ export class GmailAccountClient {
             throw new Error('spreadsheet_id is required.');
         if (!range?.trim())
             throw new Error('range is required.');
-        const response = await this.sheets.spreadsheets.values.append({
+        const response = await this.requireSheets().spreadsheets.values.append({
             spreadsheetId: spreadsheetId.trim(),
             range: range.trim(),
             valueInputOption,
@@ -1127,7 +1172,7 @@ export class GmailAccountClient {
     async createSpreadsheet(title) {
         if (!title?.trim())
             throw new Error('title is required.');
-        const response = await this.sheets.spreadsheets.create({
+        const response = await this.requireSheets().spreadsheets.create({
             requestBody: { properties: { title: title.trim() } },
         });
         return {
@@ -1143,7 +1188,7 @@ export class GmailAccountClient {
         return sheet.sheetId;
     }
     async sheetsBatchUpdate(spreadsheetId, requests) {
-        const response = await this.sheets.spreadsheets.batchUpdate({
+        const response = await this.requireSheets().spreadsheets.batchUpdate({
             spreadsheetId: spreadsheetId.trim(),
             requestBody: { requests },
         });
@@ -1325,7 +1370,7 @@ export class GmailAccountClient {
     async getDocument(documentId) {
         if (!documentId?.trim())
             throw new Error('document_id is required.');
-        const response = await this.docs.documents.get({ documentId: documentId.trim() });
+        const response = await this.requireDocs().documents.get({ documentId: documentId.trim() });
         const doc = response.data;
         const parts = [];
         const extract = (elements) => {
@@ -1355,7 +1400,7 @@ export class GmailAccountClient {
     async createDocument(title) {
         if (!title?.trim())
             throw new Error('title is required.');
-        const response = await this.docs.documents.create({ requestBody: { title: title.trim() } });
+        const response = await this.requireDocs().documents.create({ requestBody: { title: title.trim() } });
         return {
             documentId: response.data.documentId ?? '',
             url: `https://docs.google.com/document/d/${response.data.documentId}/edit`,
@@ -1364,7 +1409,7 @@ export class GmailAccountClient {
     async appendToDocument(documentId, text, options) {
         if (!documentId?.trim())
             throw new Error('document_id is required.');
-        const doc = await this.docs.documents.get({ documentId: documentId.trim() });
+        const doc = await this.requireDocs().documents.get({ documentId: documentId.trim() });
         const endIndex = doc.data.body?.content?.slice(-1)?.[0]?.endIndex ?? 1;
         const insertIndex = endIndex - 1;
         const insertedText = text.endsWith('\n') ? text : text + '\n';
@@ -1399,12 +1444,12 @@ export class GmailAccountClient {
                 },
             });
         }
-        await this.docs.documents.batchUpdate({ documentId: documentId.trim(), requestBody: { requests } });
+        await this.requireDocs().documents.batchUpdate({ documentId: documentId.trim(), requestBody: { requests } });
     }
     async replaceInDocument(documentId, findText, replaceText, matchCase = false) {
         if (!documentId?.trim())
             throw new Error('document_id is required.');
-        const response = await this.docs.documents.batchUpdate({
+        const response = await this.requireDocs().documents.batchUpdate({
             documentId: documentId.trim(),
             requestBody: {
                 requests: [{ replaceAllText: { containsText: { text: findText, matchCase }, replaceText } }],
@@ -1415,9 +1460,9 @@ export class GmailAccountClient {
     async insertTableInDocument(documentId, rows, columns) {
         if (!documentId?.trim())
             throw new Error('document_id is required.');
-        const doc = await this.docs.documents.get({ documentId: documentId.trim() });
+        const doc = await this.requireDocs().documents.get({ documentId: documentId.trim() });
         const endIndex = doc.data.body?.content?.slice(-1)?.[0]?.endIndex ?? 1;
-        await this.docs.documents.batchUpdate({
+        await this.requireDocs().documents.batchUpdate({
             documentId: documentId.trim(),
             requestBody: {
                 requests: [{ insertTable: { rows, columns, location: { index: endIndex - 1 } } }],
@@ -1427,7 +1472,7 @@ export class GmailAccountClient {
     async applyDocHeadingStyle(documentId, startIndex, endIndex, style) {
         if (!documentId?.trim())
             throw new Error('document_id is required.');
-        await this.docs.documents.batchUpdate({
+        await this.requireDocs().documents.batchUpdate({
             documentId: documentId.trim(),
             requestBody: {
                 requests: [{
@@ -1442,7 +1487,7 @@ export class GmailAccountClient {
     }
     // ─── Calendar ─────────────────────────────────────────────────────────────
     async listCalendars() {
-        const response = await this.calendar.calendarList.list({});
+        const response = await this.requireCalendar().calendarList.list({});
         return (response.data.items ?? []).map((cal) => ({
             id: cal.id ?? '',
             summary: cal.summary ?? '(untitled)',
@@ -1457,7 +1502,7 @@ export class GmailAccountClient {
     }
     async listCalendarEvents(calendarId, options) {
         const cid = (calendarId || 'primary').trim();
-        const response = await this.calendar.events.list({
+        const response = await this.requireCalendar().events.list({
             calendarId: cid,
             timeMin: options.timeMin,
             timeMax: options.timeMax,
@@ -1473,12 +1518,12 @@ export class GmailAccountClient {
             throw new Error('calendar_id is required.');
         if (!eventId?.trim())
             throw new Error('event_id is required.');
-        const response = await this.calendar.events.get({ calendarId: calendarId.trim(), eventId: eventId.trim() });
+        const response = await this.requireCalendar().events.get({ calendarId: calendarId.trim(), eventId: eventId.trim() });
         return this.parseCalendarEvent(response.data, calendarId);
     }
     async createCalendarEvent(calendarId, input) {
         const cid = (calendarId || 'primary').trim();
-        const response = await this.calendar.events.insert({
+        const response = await this.requireCalendar().events.insert({
             calendarId: cid,
             sendNotifications: input.sendNotifications ?? true,
             requestBody: {
@@ -1513,7 +1558,7 @@ export class GmailAccountClient {
             requestBody.status = updates.status;
         if (updates.attendees !== undefined)
             requestBody.attendees = updates.attendees.map((email) => ({ email }));
-        const response = await this.calendar.events.patch({
+        const response = await this.requireCalendar().events.patch({
             calendarId: calendarId.trim(),
             eventId: eventId.trim(),
             sendNotifications: updates.sendNotifications ?? true,
@@ -1526,7 +1571,7 @@ export class GmailAccountClient {
             throw new Error('calendar_id is required.');
         if (!eventId?.trim())
             throw new Error('event_id is required.');
-        await this.calendar.events.delete({ calendarId: calendarId.trim(), eventId: eventId.trim(), sendNotifications });
+        await this.requireCalendar().events.delete({ calendarId: calendarId.trim(), eventId: eventId.trim(), sendNotifications });
     }
     parseCalendarEvent(event, calendarId) {
         return {
@@ -1568,7 +1613,7 @@ export class GmailAccountClient {
         };
     }
     async listTaskLists() {
-        const response = await this.tasks.tasklists.list({ maxResults: 100 });
+        const response = await this.requireTasks().tasklists.list({ maxResults: 100 });
         return (response.data.items ?? []).map((tl) => ({
             id: tl.id ?? '',
             title: tl.title ?? '',
@@ -1577,7 +1622,7 @@ export class GmailAccountClient {
         }));
     }
     async listTasks(taskListId, includeCompleted = false) {
-        const response = await this.tasks.tasks.list({
+        const response = await this.requireTasks().tasks.list({
             tasklist: taskListId,
             showCompleted: includeCompleted,
             showHidden: includeCompleted,
@@ -1596,7 +1641,7 @@ export class GmailAccountClient {
         }));
     }
     async addTask(taskListId, title, notes, due) {
-        const response = await this.tasks.tasks.insert({
+        const response = await this.requireTasks().tasks.insert({
             tasklist: taskListId,
             requestBody: {
                 title,
@@ -1619,7 +1664,7 @@ export class GmailAccountClient {
         };
     }
     async completeTask(taskListId, taskId) {
-        const response = await this.tasks.tasks.patch({
+        const response = await this.requireTasks().tasks.patch({
             tasklist: taskListId,
             task: taskId,
             requestBody: { status: 'completed' },
@@ -1638,10 +1683,10 @@ export class GmailAccountClient {
         };
     }
     async deleteTask(taskListId, taskId) {
-        await this.tasks.tasks.delete({ tasklist: taskListId, task: taskId });
+        await this.requireTasks().tasks.delete({ tasklist: taskListId, task: taskId });
     }
     async moveTask(taskListId, taskId, previousTaskId) {
-        const response = await this.tasks.tasks.move({
+        const response = await this.requireTasks().tasks.move({
             tasklist: taskListId,
             task: taskId,
             previous: previousTaskId,

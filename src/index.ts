@@ -12,6 +12,7 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
+  SCOPE_GROUPS,
   ensureConfigLayout,
   getAccountPaths,
   getConfigRoot,
@@ -22,6 +23,7 @@ import {
   validateAccountId,
   type AccountConfig,
   type AccountsConfig,
+  type ScopeGroup,
 } from './config.js';
 import {
   getAccountHealth,
@@ -34,6 +36,7 @@ import {
   exchangeCodeForToken,
   generateAuthUrlFromCredentials,
   readCredentialsFile,
+  scopesForGroups,
   type AttachmentMetadata,
   type CalendarEvent,
   type CalendarInfo,
@@ -123,6 +126,7 @@ interface BeginAuthArgs {
   display_name?: string;
   credentials_json?: unknown;
   credentials_path?: string;
+  scope_groups?: ScopeGroup[];
 }
 
 interface FinishAuthArgs {
@@ -1287,6 +1291,11 @@ class GmailMultiInboxServer {
               credentials_path: {
                 type: 'string',
                 description: 'Path to an existing credentials.json file.',
+              },
+              scope_groups: {
+                type: 'array',
+                items: { type: 'string', enum: ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'] },
+                description: 'Which Google API scopes to request. Omit for all. Example: ["mail","calendar"]',
               },
             },
             required: ['account_id', 'email'],
@@ -2961,12 +2970,18 @@ class GmailMultiInboxServer {
   }
 
   private async handleBeginAccountAuth(rawArgs: Record<string, unknown>): Promise<CallToolResult> {
+    const rawScopeGroups = rawArgs.scope_groups;
+    const scopeGroups: ScopeGroup[] | undefined = Array.isArray(rawScopeGroups)
+      ? rawScopeGroups.filter((s): s is ScopeGroup => (SCOPE_GROUPS as readonly string[]).includes(s as string))
+      : undefined;
+
     const args: BeginAuthArgs = {
       account_id: valueToString(rawArgs.account_id),
       email: valueToString(rawArgs.email),
       display_name: valueToString(rawArgs.display_name, '') || undefined,
       credentials_json: rawArgs.credentials_json,
       credentials_path: valueToString(rawArgs.credentials_path, '') || undefined,
+      scope_groups: scopeGroups,
     };
 
     if (!args.account_id) throw new Error('account_id is required.');
@@ -2981,7 +2996,7 @@ class GmailMultiInboxServer {
     const credentials = await this.parseCredentialsInput(args, defaultPaths.credentialsPath);
     await fs.writeFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials, null, 2)}\n`, 'utf8');
 
-    const { authUrl } = generateAuthUrlFromCredentials(credentials);
+    const { authUrl } = generateAuthUrlFromCredentials(credentials, args.scope_groups);
 
     let config = await this.loadConfig();
 
@@ -2992,6 +3007,7 @@ class GmailMultiInboxServer {
       enabled: false,
       credentialPath: defaultPaths.credentialsPath,
       tokenPath: defaultPaths.tokenPath,
+      scopeGroups: args.scope_groups,
     });
 
     await saveAccountsConfig(this.configRoot, config);
@@ -4105,6 +4121,15 @@ async function runSseServer(): Promise<void> {
       <input id="email" type="email" placeholder="you@gmail.com" />
       <label>credentials.json <span style="color:#555">(paste full file contents)</span></label>
       <textarea id="credJson" rows="6" placeholder='{"installed":{"client_id":"..."}}'></textarea>
+      <label style="margin-top:12px">Access Scopes <span style="color:#555">(uncheck what you don't need)</span></label>
+      <div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_mail" checked> Mail</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_drive"> Drive</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_sheets"> Sheets</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_docs"> Docs</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_calendar"> Calendar</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.875rem"><input type="checkbox" id="scope_tasks"> Tasks</label>
+      </div>
       <button class="btn" onclick="beginAuth()">Start Authorization →</button>
       <p class="msg err" id="err1"></p>
     </div>
@@ -4169,8 +4194,11 @@ async function beginAuth() {
   if (!id || !email || !raw) { errEl.textContent = 'All fields are required.'; errEl.style.display = 'block'; return; }
   let creds;
   try { creds = JSON.parse(raw); } catch { errEl.textContent = 'Invalid JSON in credentials field.'; errEl.style.display = 'block'; return; }
+  const allGroups = ['mail','drive','sheets','docs','calendar','tasks'];
+  const scope_groups = allGroups.filter(g => document.getElementById('scope_' + g).checked);
+  if (!scope_groups.length) { errEl.textContent = 'Select at least one scope.'; errEl.style.display = 'block'; return; }
   try {
-    const res = await api('/api/accounts/begin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:id,email,credentials_json:creds})});
+    const res = await api('/api/accounts/begin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:id,email,credentials_json:creds,scope_groups})});
     const data = await res.json();
     if (!res.ok) { errEl.textContent = data.error || 'Server error.'; errEl.style.display = 'block'; return; }
     pendingId = id;
@@ -4230,18 +4258,21 @@ loadAccounts();
 
   app.post('/api/accounts/begin', requireToken, async (req: Request, res: Response) => {
     try {
-      const { account_id, email, credentials_json, display_name } = req.body as Record<string, unknown>;
+      const { account_id, email, credentials_json, display_name, scope_groups } = req.body as Record<string, unknown>;
       if (!account_id || !email || !credentials_json) {
         res.status(400).json({ error: 'account_id, email, and credentials_json are required.' });
         return;
       }
       validateAccountId(String(account_id));
+      const scopeGroups: ScopeGroup[] | undefined = Array.isArray(scope_groups)
+        ? scope_groups.filter((s): s is ScopeGroup => (SCOPE_GROUPS as readonly string[]).includes(s as string))
+        : undefined;
       const configRoot = getConfigRoot();
       await ensureConfigLayout(configRoot);
       const defaultPaths = getDefaultAccountPaths(configRoot, String(account_id));
       await fs.mkdir(defaultPaths.accountDir, { recursive: true });
       await fs.writeFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials_json, null, 2)}\n`, 'utf8');
-      const { authUrl } = generateAuthUrlFromCredentials(credentials_json);
+      const { authUrl } = generateAuthUrlFromCredentials(credentials_json, scopeGroups);
       let config = await loadAccountsConfig(configRoot);
       config = upsertAccount(config, {
         id: String(account_id),
@@ -4250,6 +4281,7 @@ loadAccounts();
         enabled: false,
         credentialPath: defaultPaths.credentialsPath,
         tokenPath: defaultPaths.tokenPath,
+        scopeGroups,
       });
       await saveAccountsConfig(configRoot, config);
       res.json({ authUrl });

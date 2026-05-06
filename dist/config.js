@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+export const SCOPE_GROUPS = ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'];
 const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.gmail-multi-mcp');
 const ACCOUNT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 function expandHome(inputPath) {
@@ -60,6 +61,10 @@ function sanitizeAccount(configRoot, input) {
         return null;
     validateAccountId(candidate.id);
     const defaults = getDefaultAccountPaths(configRoot, candidate.id);
+    const rawScopeGroups = candidate.scopeGroups;
+    const scopeGroups = Array.isArray(rawScopeGroups)
+        ? rawScopeGroups.filter((s) => SCOPE_GROUPS.includes(s))
+        : undefined;
     return {
         id: candidate.id,
         email: candidate.email,
@@ -71,6 +76,7 @@ function sanitizeAccount(configRoot, input) {
         tokenPath: typeof candidate.tokenPath === 'string'
             ? path.resolve(expandHome(candidate.tokenPath))
             : defaults.tokenPath,
+        scopeGroups: scopeGroups && scopeGroups.length > 0 ? scopeGroups : undefined,
     };
 }
 export async function loadAccountsConfig(configRoot) {

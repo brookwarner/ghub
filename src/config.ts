@@ -2,6 +2,9 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+export const SCOPE_GROUPS = ['mail', 'drive', 'sheets', 'docs', 'calendar', 'tasks'] as const;
+export type ScopeGroup = typeof SCOPE_GROUPS[number];
+
 export interface AccountConfig {
   id: string;
   email: string;
@@ -9,6 +12,7 @@ export interface AccountConfig {
   enabled: boolean;
   credentialPath?: string;
   tokenPath?: string;
+  scopeGroups?: ScopeGroup[];
 }
 
 export interface AccountsConfig {
@@ -91,6 +95,11 @@ function sanitizeAccount(configRoot: string, input: unknown): AccountConfig | nu
 
   const defaults = getDefaultAccountPaths(configRoot, candidate.id);
 
+  const rawScopeGroups = (candidate as Record<string, unknown>).scopeGroups;
+  const scopeGroups: ScopeGroup[] | undefined = Array.isArray(rawScopeGroups)
+    ? rawScopeGroups.filter((s): s is ScopeGroup => (SCOPE_GROUPS as readonly string[]).includes(s as string))
+    : undefined;
+
   return {
     id: candidate.id,
     email: candidate.email,
@@ -104,6 +113,7 @@ function sanitizeAccount(configRoot: string, input: unknown): AccountConfig | nu
       typeof candidate.tokenPath === 'string'
         ? path.resolve(expandHome(candidate.tokenPath))
         : defaults.tokenPath,
+    scopeGroups: scopeGroups && scopeGroups.length > 0 ? scopeGroups : undefined,
   };
 }
 
