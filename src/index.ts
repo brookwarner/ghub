@@ -4098,7 +4098,9 @@ async function runSseServer(): Promise<void> {
   const requireToken = (req: Request, res: Response, next: () => void): void => {
     if (!SECRET_TOKEN || req.method === 'OPTIONS') { next(); return; }
     const header = req.headers['authorization'];
-    const token = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '') : '';
+    const headerToken = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '') : '';
+    const queryToken = typeof req.query['token'] === 'string' ? req.query['token'] : '';
+    const token = headerToken || queryToken;
     if (!token || !tokensEqual(token)) {
       res.status(401).type('text/plain').send('Unauthorized');
       return;
