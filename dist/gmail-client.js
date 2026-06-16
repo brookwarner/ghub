@@ -63,6 +63,36 @@ function extractAttachmentsMetadata(payload) {
     }
     return out;
 }
+/**
+ * Download every (non-inline) attachment described by a single `messages.get`
+ * payload, using a caller-supplied byte fetcher.
+ *
+ * Gmail mints **ephemeral, per-request `attachmentId` tokens** for some messages
+ * (notably those relayed via Exchange/Outlook): two separate `messages.get` calls
+ * on the same message return different attachment ids. Any flow that reads an id
+ * from one fetch and then re-fetches the message to resolve/validate that id will
+ * fail with "not found". This helper deliberately fetches the message ONCE and
+ * downloads each attachment with the id from that same payload — never reusing an
+ * id across requests.
+ */
+export async function downloadAttachmentsFromPayload(payload, fetchData) {
+    const metas = extractAttachmentsMetadata(payload).filter((a) => !a.isInline);
+    const downloaded = [];
+    const errors = [];
+    for (const metadata of metas) {
+        try {
+            const data = await fetchData(metadata.id);
+            if (!data) {
+                throw new Error(`Attachment "${metadata.filename}" returned no data payload.`);
+            }
+            downloaded.push({ bytes: decodeBase64UrlBuffer(data), metadata });
+        }
+        catch (err) {
+            errors.push({ metadata, error: err.message });
+        }
+    }
+    return { downloaded, errors };
+}
 function findAttachmentPart(payload, attachmentId) {
     if (!payload)
         return null;
@@ -551,6 +581,34 @@ export class GmailAccountClient {
         });
         return extractAttachmentsMetadata(response.data.payload).filter((a) => !a.isInline);
     }
+    /**
+     * Fetch and download all attachments for a message in a single round trip.
+     *
+     * Fetches the message once and downloads each attachment using the
+     * `attachmentId` from that same payload. This avoids the ephemeral-id trap:
+     * ids obtained from a prior `messages.get` (or from search/thread metadata)
+     * can no longer be resolved on a later fetch for Exchange/Outlook-relayed
+     * messages. See `downloadAttachmentsFromPayload`.
+     */
+    async getAllAttachments(messageId) {
+        this.requireMailRead();
+        if (!messageId || messageId.trim() === '') {
+            throw new Error('message_id is required.');
+        }
+        const messageResponse = await this.gmail.users.messages.get({
+            userId: 'me',
+            id: messageId,
+            format: 'full',
+        });
+        return downloadAttachmentsFromPayload(messageResponse.data.payload, async (attachmentId) => {
+            const attachmentResponse = await this.gmail.users.messages.attachments.get({
+                userId: 'me',
+                messageId,
+                id: attachmentId,
+            });
+            return attachmentResponse.data.data;
+        });
+    }
     async getAttachment(messageId, attachmentId) {
         this.requireMailRead();
         if (!messageId || messageId.trim() === '') {
@@ -566,7 +624,10 @@ export class GmailAccountClient {
         });
         const part = findAttachmentPart(messageResponse.data.payload, attachmentId);
         if (!part || !part.filename) {
-            throw new Error(`Attachment ${attachmentId} not found on message ${messageId}.`);
+            throw new Error(`Attachment not found on message ${messageId}. Gmail regenerates attachment ids ` +
+                `on every fetch for some messages, so an id from an earlier read/search/thread call ` +
+                `may already be stale. Use get_all_attachments (account, email_id) — it resolves ids ` +
+                `within a single fetch and downloads every file in one shot.`);
         }
         const attachmentResponse = await this.gmail.users.messages.attachments.get({
             userId: 'me',

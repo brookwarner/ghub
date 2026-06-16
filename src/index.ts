@@ -3184,25 +3184,26 @@ class GmailMultiInboxServer {
     const account = resolveWriteAccount(config, args.account);
     const client = await this.getClientForAccount(account);
 
-    const list: AttachmentMetadata[] = await client.listAttachments(args.email_id);
+    const { downloaded, errors: downloadErrors } = await client.getAllAttachments(
+      args.email_id,
+    );
 
     const settled = await Promise.allSettled(
-      list.map(async (meta) => {
-        const { bytes, metadata } = await client.getAttachment(args.email_id, meta.id);
-        return saveAndExtract(bytes, metadata);
-      }),
+      downloaded.map(({ bytes, metadata }) => saveAndExtract(bytes, metadata)),
     );
 
     const attachments: AttachmentContent[] = [];
-    const errors: Array<{ attachment_id: string; error: string }> = [];
+    const errors: Array<{ attachment_id: string; error: string }> = downloadErrors.map(
+      (e) => ({ attachment_id: e.metadata.filename, error: e.error }),
+    );
 
     settled.forEach((result, index) => {
-      const originalId = list[index]?.id ?? '(unknown)';
+      const label = downloaded[index]?.metadata.filename ?? '(unknown)';
       if (result.status === 'fulfilled') {
         attachments.push(result.value);
       } else {
         errors.push({
-          attachment_id: originalId,
+          attachment_id: label,
           error:
             result.reason instanceof Error
               ? result.reason.message

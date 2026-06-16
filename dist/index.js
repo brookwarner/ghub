@@ -2478,21 +2478,18 @@ class GmailMultiInboxServer {
         const config = await this.loadConfig();
         const account = resolveWriteAccount(config, args.account);
         const client = await this.getClientForAccount(account);
-        const list = await client.listAttachments(args.email_id);
-        const settled = await Promise.allSettled(list.map(async (meta) => {
-            const { bytes, metadata } = await client.getAttachment(args.email_id, meta.id);
-            return saveAndExtract(bytes, metadata);
-        }));
+        const { downloaded, errors: downloadErrors } = await client.getAllAttachments(args.email_id);
+        const settled = await Promise.allSettled(downloaded.map(({ bytes, metadata }) => saveAndExtract(bytes, metadata)));
         const attachments = [];
-        const errors = [];
+        const errors = downloadErrors.map((e) => ({ attachment_id: e.metadata.filename, error: e.error }));
         settled.forEach((result, index) => {
-            const originalId = list[index]?.id ?? '(unknown)';
+            const label = downloaded[index]?.metadata.filename ?? '(unknown)';
             if (result.status === 'fulfilled') {
                 attachments.push(result.value);
             }
             else {
                 errors.push({
-                    attachment_id: originalId,
+                    attachment_id: label,
                     error: result.reason instanceof Error
                         ? result.reason.message
                         : String(result.reason),
