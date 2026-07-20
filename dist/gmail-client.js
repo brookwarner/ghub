@@ -222,7 +222,21 @@ function inferContentType(filename) {
 function sanitizeHeaderValue(value) {
     return value.replace(/[\r\n"]/g, ' ').trim();
 }
-async function buildRawEmailMessage(input) {
+/**
+ * RFC 2047 encode a header value when it contains non-ASCII characters.
+ * Without this, UTF-8 bytes in subjects reach the client as Mojibake.
+ *
+ * CR/LF are stripped first: an unencoded newline in a subject would let the
+ * caller inject arbitrary headers (e.g. an extra `Bcc:`) into the message.
+ */
+function encodeMimeHeader(value) {
+    const stripped = value.replace(/[\r\n]/g, ' ');
+    if (/[^\x00-\x7F]/.test(stripped)) {
+        return `=?UTF-8?B?${Buffer.from(stripped, 'utf8').toString('base64')}?=`;
+    }
+    return stripped;
+}
+export async function buildRawEmailMessage(input) {
     const to = normalizeOutgoingAddressList(input.to);
     if (!to) {
         throw new Error('Recipient "to" is required.');
@@ -231,7 +245,7 @@ async function buildRawEmailMessage(input) {
     if (attachments.length === 0) {
         const lines = [
             `To: ${to}`,
-            `Subject: ${input.subject}`,
+            `Subject: ${encodeMimeHeader(input.subject)}`,
             'MIME-Version: 1.0',
             `Content-Type: text/${input.html ? 'html' : 'plain'}; charset=utf-8`,
         ];
@@ -250,7 +264,7 @@ async function buildRawEmailMessage(input) {
     }
     const lines = [
         `To: ${to}`,
-        `Subject: ${input.subject}`,
+        `Subject: ${encodeMimeHeader(input.subject)}`,
         'MIME-Version: 1.0',
     ];
     const cc = normalizeOutgoingAddressList(input.cc);
