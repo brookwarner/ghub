@@ -48,10 +48,18 @@ jobs:
             echo "Installing dependencies..."
             npm install --ignore-scripts --omit=dev
 
-            echo "Starting PM2..."
+            echo "Writing env file..."
             mkdir -p /var/data/multi-gmail
-            SECRET_TOKEN="$SECRET_TOKEN" pm2 restart ecosystem.config.cjs --update-env || \
-              SECRET_TOKEN="$SECRET_TOKEN" pm2 start ecosystem.config.cjs
+            # Outside the repo, so the git reset above cannot remove it. This is
+            # what keeps a manual 'pm2 restart' or a post-reboot resurrect
+            # authenticated rather than falling back to an unprotected server.
+            umask 077
+            printf 'SECRET_TOKEN=%s\n' "$SECRET_TOKEN" > /var/data/multi-gmail/.env
+            chmod 600 /var/data/multi-gmail/.env
+
+            echo "Starting PM2..."
+            pm2 restart ecosystem.config.cjs --update-env || \
+              pm2 start ecosystem.config.cjs
             pm2 save
 
             echo "Done. Deployed commit: \$(git rev-parse --short HEAD)"

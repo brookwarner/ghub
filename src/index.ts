@@ -4121,7 +4121,18 @@ async function runSseServer(): Promise<void> {
 
   const SECRET_TOKEN = process.env.SECRET_TOKEN?.trim();
   if (!SECRET_TOKEN) {
-    console.error('[ghub] WARNING: SECRET_TOKEN is not set. All endpoints are unprotected.');
+    // Fail closed. This process holds live OAuth tokens for every configured
+    // Google account, so running without auth is never an acceptable default.
+    // For local development set ALLOW_UNAUTHENTICATED=1 explicitly.
+    if (process.env.ALLOW_UNAUTHENTICATED !== '1') {
+      console.error(
+        '[ghub] FATAL: SECRET_TOKEN is not set. Refusing to start with all endpoints unprotected.\n' +
+          '       Set SECRET_TOKEN in /var/data/multi-gmail/.env (production) or the environment.\n' +
+          '       For local development only, set ALLOW_UNAUTHENTICATED=1 to override.',
+      );
+      process.exit(1);
+    }
+    console.error('[ghub] WARNING: running unauthenticated (ALLOW_UNAUTHENTICATED=1). All endpoints are unprotected.');
   }
   const SECRET_TOKEN_BUF = SECRET_TOKEN ? Buffer.from(SECRET_TOKEN, 'utf8') : null;
 
