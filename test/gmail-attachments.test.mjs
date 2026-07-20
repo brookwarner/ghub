@@ -93,3 +93,49 @@ test('same-fetch ids succeed where cross-fetch (stale) ids would 404', async () 
   assert.equal(badRun.downloaded.length, 0);
   assert.equal(badRun.errors.length, 2);
 });
+
+// Regression: Gmail omits `attachmentId` and ships the bytes as `body.data` for
+// small attachments. Keying only off attachmentId dropped them silently — they
+// never appeared in list_attachments and could not be fetched at all.
+test('downloads payload-embedded attachments without an API call', async () => {
+  const embedded = {
+    filename: 'small.txt',
+    mimeType: 'text/plain',
+    body: { size: 9, data: b64url('tiny-file') },
+  };
+  const p = payload([embedded, filePart('live-1', 'big.pdf')]);
+
+  const seenIds = [];
+  const { downloaded, errors } = await downloadAttachmentsFromPayload(p, async (id) => {
+    seenIds.push(id);
+    return b64url(`bytes-of-${id}`);
+  });
+
+  assert.equal(errors.length, 0);
+  assert.deepEqual(seenIds, ['live-1'], 'no byte fetch for embedded attachments');
+  assert.equal(downloaded.length, 2, 'the embedded attachment is not dropped');
+
+  const small = downloaded.find((d) => d.metadata.filename === 'small.txt');
+  assert.ok(small, 'embedded attachment is present');
+  assert.equal(small.bytes.toString('utf8'), 'tiny-file');
+  assert.match(small.metadata.id, /^embedded:/);
+});
+
+// An embedded part carrying Content-Disposition: inline is still an embedded
+// image, and must stay excluded like any other inline part.
+test('still skips inline-disposition parts that are payload-embedded', async () => {
+  const inlineEmbedded = {
+    filename: 'logo.png',
+    mimeType: 'image/png',
+    headers: [{ name: 'Content-Disposition', value: 'inline' }],
+    body: { size: 4, data: b64url('png!') },
+  };
+  const p = payload([inlineEmbedded, filePart('live-1', 'doc.pdf')]);
+
+  const { downloaded } = await downloadAttachmentsFromPayload(p, async (id) =>
+    b64url(`bytes-of-${id}`),
+  );
+
+  assert.equal(downloaded.length, 1);
+  assert.equal(downloaded[0].metadata.filename, 'doc.pdf');
+});
