@@ -55,7 +55,13 @@ interface ReadEmailsArgs {
   query?: string;
   max_results?: number;
   include_body?: boolean;
+  body_chars?: number;
 }
+
+/** Default body cap for bulk email listings. A search can return up to 500
+ *  messages, so bodies stay capped unless the caller raises body_chars.
+ *  Single-thread reads (get_email_thread) are never capped. */
+const DEFAULT_BODY_CHARS = 2000;
 
 interface SearchEmailsArgs {
   account?: string;
@@ -522,7 +528,11 @@ function driveFileDateForSort(file: DriveFileSummary): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function formatEmailItem(email: ParsedEmail, includeBody: boolean): string {
+function formatEmailItem(
+  email: ParsedEmail,
+  includeBody: boolean,
+  bodyChars: number | null = DEFAULT_BODY_CHARS,
+): string {
   const lines = [
     `**Account**: ${email.accountId} (${email.accountEmail})`,
     `**From**: ${email.from || '(unknown)'}`,
@@ -540,7 +550,10 @@ function formatEmailItem(email: ParsedEmail, includeBody: boolean): string {
   if (includeBody) {
     const body = (email.body || '').trim();
     if (body) {
-      const trimmed = body.length > 600 ? `${body.slice(0, 600)}...` : body;
+      const capped = bodyChars !== null && bodyChars > 0 && body.length > bodyChars;
+      const trimmed = capped
+        ? `${body.slice(0, bodyChars)}\n\n… (truncated, ${body.length - bodyChars} more characters — raise body_chars, or call get_email_thread for the full body)`
+        : body;
       lines.push(`**Body**:\n${trimmed}`);
     }
   }
@@ -605,6 +618,7 @@ function formatEmailListOutput(input: {
   totalFound: number;
   returned: ParsedEmail[];
   includeBody: boolean;
+  bodyChars?: number | null;
   errors: string[];
 }): string {
   const sections: string[] = [];
@@ -620,7 +634,13 @@ function formatEmailListOutput(input: {
     sections.push('');
     input.returned.forEach((email, index) => {
       sections.push(`## ${index + 1}. ${email.subject || '(no subject)'}`);
-      sections.push(formatEmailItem(email, input.includeBody));
+      sections.push(
+        formatEmailItem(
+          email,
+          input.includeBody,
+          input.bodyChars === undefined ? DEFAULT_BODY_CHARS : input.bodyChars,
+        ),
+      );
       sections.push('');
     });
   }
@@ -816,6 +836,12 @@ class GmailMultiInboxServer {
                 description: 'Include plaintext body extraction in each returned email.',
                 default: false,
               },
+              body_chars: {
+                type: 'number',
+                description:
+                  'Max characters of body text per email when include_body is true (default 2000). Truncation is always reported with the number of characters dropped. Set to 0 for no limit, but note a large max_results with uncapped bodies can return a very large response. To read one message in full, prefer get_email_thread.',
+                default: 2000,
+              },
             },
             additionalProperties: false,
           },
@@ -872,7 +898,7 @@ class GmailMultiInboxServer {
         },
         {
           name: 'get_email_thread',
-          description: 'Get a full email thread for one account (account required). Each message lists attachment metadata (filename, attachment_id, size). To read attachment content — PDF text, DOCX, XLSX, images via OCR — call get_all_attachments with the Gmail message ID shown as "Gmail ID" in each message.',
+          description: 'Get a full email thread for one account (account required). Message bodies are returned in full and are never truncated, so prefer this over read_emails when you need the complete text of a message. Each message lists attachment metadata (filename, attachment_id, size). To read attachment content — PDF text, DOCX, XLSX, images via OCR — call get_all_attachments with the Gmail message ID shown as "Gmail ID" in each message.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -2169,6 +2195,7 @@ class GmailMultiInboxServer {
       query: valueToString(rawArgs.query, ''),
       max_results: valueToNumber(rawArgs.max_results, 20),
       include_body: valueToBoolean(rawArgs.include_body, false),
+      body_chars: valueToNumber(rawArgs.body_chars, DEFAULT_BODY_CHARS),
     };
 
     const config = await this.loadConfig();
@@ -2176,6 +2203,9 @@ class GmailMultiInboxServer {
     const query = args.query?.trim() ?? '';
     const includeBody = args.include_body ?? false;
     const maxResults = clamp(args.max_results ?? 20, 1, 500);
+    // 0 (or negative) means "no cap"; formatEmailItem treats null as unlimited.
+    const rawBodyChars = args.body_chars ?? DEFAULT_BODY_CHARS;
+    const bodyChars = rawBodyChars > 0 ? rawBodyChars : null;
 
     const accountResults = await Promise.all(
       targetAccounts.map(async (account) => {
@@ -2213,6 +2243,7 @@ class GmailMultiInboxServer {
         totalFound: merged.length,
         returned,
         includeBody,
+        bodyChars,
         errors,
       })
     );
@@ -2353,7 +2384,9 @@ class GmailMultiInboxServer {
 
     thread.messages.forEach((message, index) => {
       lines.push(`## ${index + 1}. ${message.subject}`);
-      lines.push(formatEmailItem(message, true));
+      // Single named thread: the caller asked for this specific conversation,
+      // so bodies are never capped here.
+      lines.push(formatEmailItem(message, true, null));
       lines.push('');
     });
 
