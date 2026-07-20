@@ -20,6 +20,8 @@ export const SCOPE_URLS = {
     'tasks.write': 'https://www.googleapis.com/auth/tasks',
 };
 export const GOOGLE_ACCOUNT_SCOPES = Object.values(SCOPE_URLS);
+/** Synthetic id prefix for attachments Gmail embedded directly in the payload. */
+export const EMBEDDED_ATTACHMENT_PREFIX = 'embedded:';
 function decodeBase64Url(value) {
     const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
     const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
@@ -41,15 +43,22 @@ function extractAttachmentsMetadata(payload) {
         return [];
     const out = [];
     const consider = (part) => {
-        if (part.filename && part.body?.attachmentId) {
-            out.push({
-                id: part.body.attachmentId,
-                filename: part.filename,
-                contentType: part.mimeType ?? 'application/octet-stream',
-                sizeBytes: Number(part.body.size ?? 0),
-                isInline: isInlineDisposition(part.headers),
-            });
-        }
+        if (!part.filename)
+            return;
+        // Gmail delivers small attachments as `body.data` with no `attachmentId`.
+        // Keying only off `attachmentId` silently dropped them: they never appeared
+        // in list_attachments and could not be fetched at all.
+        const embeddedData = !part.body?.attachmentId ? part.body?.data ?? undefined : undefined;
+        if (!part.body?.attachmentId && !embeddedData)
+            return;
+        out.push({
+            id: part.body?.attachmentId ?? `${EMBEDDED_ATTACHMENT_PREFIX}${part.filename}`,
+            filename: part.filename,
+            contentType: part.mimeType ?? 'application/octet-stream',
+            sizeBytes: Number(part.body?.size ?? 0),
+            isInline: isInlineDisposition(part.headers),
+            ...(embeddedData ? { embeddedData } : {}),
+        });
     };
     consider(payload);
     const stack = payload.parts ? [...payload.parts] : [];
@@ -81,7 +90,9 @@ export async function downloadAttachmentsFromPayload(payload, fetchData) {
     const errors = [];
     for (const metadata of metas) {
         try {
-            const data = await fetchData(metadata.id);
+            // Payload-embedded bytes are already in hand — there is no server-side
+            // attachment to fetch, and `attachments.get` would 404 on the synthetic id.
+            const data = metadata.embeddedData ?? (await fetchData(metadata.id));
             if (!data) {
                 throw new Error(`Attachment "${metadata.filename}" returned no data payload.`);
             }
@@ -96,14 +107,22 @@ export async function downloadAttachmentsFromPayload(payload, fetchData) {
 function findAttachmentPart(payload, attachmentId) {
     if (!payload)
         return null;
-    if (payload.body?.attachmentId === attachmentId)
+    // Payload-embedded attachments have no server-side id, so they are addressed
+    // by the synthetic `embedded:<filename>` id minted in extractAttachmentsMetadata.
+    const embeddedName = attachmentId.startsWith(EMBEDDED_ATTACHMENT_PREFIX)
+        ? attachmentId.slice(EMBEDDED_ATTACHMENT_PREFIX.length)
+        : null;
+    const matches = (part) => embeddedName !== null
+        ? part.filename === embeddedName && !part.body?.attachmentId && Boolean(part.body?.data)
+        : part.body?.attachmentId === attachmentId;
+    if (matches(payload))
         return payload;
     const stack = payload.parts ? [...payload.parts] : [];
     while (stack.length > 0) {
         const part = stack.shift();
         if (!part)
             continue;
-        if (part.body?.attachmentId === attachmentId)
+        if (matches(part))
             return part;
         if (part.parts?.length)
             stack.push(...part.parts);
@@ -203,7 +222,21 @@ function inferContentType(filename) {
 function sanitizeHeaderValue(value) {
     return value.replace(/[\r\n"]/g, ' ').trim();
 }
-async function buildRawEmailMessage(input) {
+/**
+ * RFC 2047 encode a header value when it contains non-ASCII characters.
+ * Without this, UTF-8 bytes in subjects reach the client as Mojibake.
+ *
+ * CR/LF are stripped first: an unencoded newline in a subject would let the
+ * caller inject arbitrary headers (e.g. an extra `Bcc:`) into the message.
+ */
+function encodeMimeHeader(value) {
+    const stripped = value.replace(/[\r\n]/g, ' ');
+    if (/[^\x00-\x7F]/.test(stripped)) {
+        return `=?UTF-8?B?${Buffer.from(stripped, 'utf8').toString('base64')}?=`;
+    }
+    return stripped;
+}
+export async function buildRawEmailMessage(input) {
     const to = normalizeOutgoingAddressList(input.to);
     if (!to) {
         throw new Error('Recipient "to" is required.');
@@ -212,7 +245,7 @@ async function buildRawEmailMessage(input) {
     if (attachments.length === 0) {
         const lines = [
             `To: ${to}`,
-            `Subject: ${input.subject}`,
+            `Subject: ${encodeMimeHeader(input.subject)}`,
             'MIME-Version: 1.0',
             `Content-Type: text/${input.html ? 'html' : 'plain'}; charset=utf-8`,
         ];
@@ -231,7 +264,7 @@ async function buildRawEmailMessage(input) {
     }
     const lines = [
         `To: ${to}`,
-        `Subject: ${input.subject}`,
+        `Subject: ${encodeMimeHeader(input.subject)}`,
         'MIME-Version: 1.0',
     ];
     const cc = normalizeOutgoingAddressList(input.cc);
@@ -629,12 +662,20 @@ export class GmailAccountClient {
                 `may already be stale. Use get_all_attachments (account, email_id) — it resolves ids ` +
                 `within a single fetch and downloads every file in one shot.`);
         }
-        const attachmentResponse = await this.gmail.users.messages.attachments.get({
-            userId: 'me',
-            messageId,
-            id: attachmentId,
-        });
-        const data = attachmentResponse.data.data;
+        // Embedded attachments carry their bytes in the message payload; there is
+        // no server-side attachment to GET.
+        let data;
+        if (attachmentId.startsWith(EMBEDDED_ATTACHMENT_PREFIX)) {
+            data = part.body?.data;
+        }
+        else {
+            const attachmentResponse = await this.gmail.users.messages.attachments.get({
+                userId: 'me',
+                messageId,
+                id: attachmentId,
+            });
+            data = attachmentResponse.data.data;
+        }
         if (!data) {
             throw new Error(`Attachment ${attachmentId} has no data payload.`);
         }

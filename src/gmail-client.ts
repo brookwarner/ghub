@@ -23,12 +23,22 @@ export const SCOPE_URLS = {
 
 export const GOOGLE_ACCOUNT_SCOPES = Object.values(SCOPE_URLS) as string[];
 
+/** Synthetic id prefix for attachments Gmail embedded directly in the payload. */
+export const EMBEDDED_ATTACHMENT_PREFIX = 'embedded:';
+
 export interface AttachmentMetadata {
   id: string;
   filename: string;
   contentType: string;
   sizeBytes: number;
+  /** Content-Disposition is `inline` — an embedded image, not a real attachment. */
   isInline: boolean;
+  /**
+   * base64url bytes carried in the payload itself. Gmail omits `attachmentId`
+   * for small attachments and ships the data inline instead; those bytes are
+   * already in hand, so no `attachments.get` call is needed (or possible).
+   */
+  embeddedData?: string;
 }
 
 export interface ParsedEmail {
@@ -195,15 +205,22 @@ function extractAttachmentsMetadata(
 
   const out: AttachmentMetadata[] = [];
   const consider = (part: gmail_v1.Schema$MessagePart) => {
-    if (part.filename && part.body?.attachmentId) {
-      out.push({
-        id: part.body.attachmentId,
-        filename: part.filename,
-        contentType: part.mimeType ?? 'application/octet-stream',
-        sizeBytes: Number(part.body.size ?? 0),
-        isInline: isInlineDisposition(part.headers),
-      });
-    }
+    if (!part.filename) return;
+
+    // Gmail delivers small attachments as `body.data` with no `attachmentId`.
+    // Keying only off `attachmentId` silently dropped them: they never appeared
+    // in list_attachments and could not be fetched at all.
+    const embeddedData = !part.body?.attachmentId ? part.body?.data ?? undefined : undefined;
+    if (!part.body?.attachmentId && !embeddedData) return;
+
+    out.push({
+      id: part.body?.attachmentId ?? `${EMBEDDED_ATTACHMENT_PREFIX}${part.filename}`,
+      filename: part.filename,
+      contentType: part.mimeType ?? 'application/octet-stream',
+      sizeBytes: Number(part.body?.size ?? 0),
+      isInline: isInlineDisposition(part.headers),
+      ...(embeddedData ? { embeddedData } : {}),
+    });
   };
 
   consider(payload);
@@ -251,7 +268,9 @@ export async function downloadAttachmentsFromPayload(
 
   for (const metadata of metas) {
     try {
-      const data = await fetchData(metadata.id);
+      // Payload-embedded bytes are already in hand — there is no server-side
+      // attachment to fetch, and `attachments.get` would 404 on the synthetic id.
+      const data = metadata.embeddedData ?? (await fetchData(metadata.id));
       if (!data) {
         throw new Error(`Attachment "${metadata.filename}" returned no data payload.`);
       }
@@ -269,13 +288,24 @@ function findAttachmentPart(
   attachmentId: string,
 ): gmail_v1.Schema$MessagePart | null {
   if (!payload) return null;
-  if (payload.body?.attachmentId === attachmentId) return payload;
+
+  // Payload-embedded attachments have no server-side id, so they are addressed
+  // by the synthetic `embedded:<filename>` id minted in extractAttachmentsMetadata.
+  const embeddedName = attachmentId.startsWith(EMBEDDED_ATTACHMENT_PREFIX)
+    ? attachmentId.slice(EMBEDDED_ATTACHMENT_PREFIX.length)
+    : null;
+  const matches = (part: gmail_v1.Schema$MessagePart) =>
+    embeddedName !== null
+      ? part.filename === embeddedName && !part.body?.attachmentId && Boolean(part.body?.data)
+      : part.body?.attachmentId === attachmentId;
+
+  if (matches(payload)) return payload;
 
   const stack: gmail_v1.Schema$MessagePart[] = payload.parts ? [...payload.parts] : [];
   while (stack.length > 0) {
     const part = stack.shift();
     if (!part) continue;
-    if (part.body?.attachmentId === attachmentId) return part;
+    if (matches(part)) return part;
     if (part.parts?.length) stack.push(...part.parts);
   }
 
@@ -387,7 +417,22 @@ function sanitizeHeaderValue(value: string): string {
   return value.replace(/[\r\n"]/g, ' ').trim();
 }
 
-async function buildRawEmailMessage(input: {
+/**
+ * RFC 2047 encode a header value when it contains non-ASCII characters.
+ * Without this, UTF-8 bytes in subjects reach the client as Mojibake.
+ *
+ * CR/LF are stripped first: an unencoded newline in a subject would let the
+ * caller inject arbitrary headers (e.g. an extra `Bcc:`) into the message.
+ */
+function encodeMimeHeader(value: string): string {
+  const stripped = value.replace(/[\r\n]/g, ' ');
+  if (/[^\x00-\x7F]/.test(stripped)) {
+    return `=?UTF-8?B?${Buffer.from(stripped, 'utf8').toString('base64')}?=`;
+  }
+  return stripped;
+}
+
+export async function buildRawEmailMessage(input: {
   to: string;
   subject: string;
   body: string;
@@ -408,7 +453,7 @@ async function buildRawEmailMessage(input: {
   if (attachments.length === 0) {
     const lines: string[] = [
       `To: ${to}`,
-      `Subject: ${input.subject}`,
+      `Subject: ${encodeMimeHeader(input.subject)}`,
       'MIME-Version: 1.0',
       `Content-Type: text/${input.html ? 'html' : 'plain'}; charset=utf-8`,
     ];
@@ -428,7 +473,7 @@ async function buildRawEmailMessage(input: {
 
   const lines: string[] = [
     `To: ${to}`,
-    `Subject: ${input.subject}`,
+    `Subject: ${encodeMimeHeader(input.subject)}`,
     'MIME-Version: 1.0',
   ];
 
@@ -975,13 +1020,20 @@ export class GmailAccountClient {
       );
     }
 
-    const attachmentResponse = await this.gmail.users.messages.attachments.get({
-      userId: 'me',
-      messageId,
-      id: attachmentId,
-    });
+    // Embedded attachments carry their bytes in the message payload; there is
+    // no server-side attachment to GET.
+    let data: string | null | undefined;
+    if (attachmentId.startsWith(EMBEDDED_ATTACHMENT_PREFIX)) {
+      data = part.body?.data;
+    } else {
+      const attachmentResponse = await this.gmail.users.messages.attachments.get({
+        userId: 'me',
+        messageId,
+        id: attachmentId,
+      });
+      data = attachmentResponse.data.data;
+    }
 
-    const data = attachmentResponse.data.data;
     if (!data) {
       throw new Error(`Attachment ${attachmentId} has no data payload.`);
     }
