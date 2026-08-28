@@ -50,6 +50,11 @@ module.exports = {
     cwd: '/var/www/mcp.brookwarner.com',
     env: {
       NODE_ENV: 'production',
+      // Loopback only: this host reaches the app solely through the LiteSpeed
+      // reverse proxy, which targets http://127.0.0.1:8080. The code defaults to
+      // 0.0.0.0 so container deployments still bind where they need to; only
+      // this VPS config narrows it.
+      HOST: '127.0.0.1',
       PORT: '8080',
       GMAILMCPCONFIG_DIR: '/var/data/multi-gmail',
       SECRET_TOKEN,

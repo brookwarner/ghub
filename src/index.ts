@@ -4539,8 +4539,8 @@ loadAccounts();
     }
   });
 
-  const httpServer = app.listen(port, () => {
-    console.error('[ghub] Running on Streamable HTTP at port ' + port + '. Route: /mcp');
+  const httpServer = app.listen(port, host, () => {
+    console.error('[ghub] Running on Streamable HTTP at ' + host + ':' + port + '. Route: /mcp');
   });
 
   const shutdown = async (): Promise<void> => {
