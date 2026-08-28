@@ -87,8 +87,31 @@ export function getAccountPaths(configRoot: string, account: AccountConfig): Acc
   };
 }
 
+/**
+ * Write a file containing OAuth material with owner-only permissions.
+ *
+ * `writeFile`'s `mode` only applies when the file is created, so an existing
+ * world-readable file keeps its old permissions on rewrite. The explicit chmod
+ * covers that case — the common one here, since both re-authentication and
+ * every silent token refresh overwrite a token.json that already exists.
+ *
+ * These files hold refresh tokens and OAuth client secrets. The default 0644
+ * makes them readable by every local user, so on a shared host any compromised
+ * service account can read them.
+ */
+export async function writeSecretFile(filePath: string, contents: string): Promise<void> {
+  await fs.writeFile(filePath, contents, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(filePath, 0o600);
+}
+
+/** Create a directory that will hold OAuth material, owner-only. */
+export async function mkdirSecret(dirPath: string): Promise<void> {
+  await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+  await fs.chmod(dirPath, 0o700);
+}
+
 export async function ensureConfigLayout(configRoot: string): Promise<void> {
-  await fs.mkdir(path.join(configRoot, 'accounts'), { recursive: true });
+  await mkdirSecret(path.join(configRoot, 'accounts'));
 }
 
 function sanitizeAccount(configRoot: string, input: unknown): AccountConfig | null {

@@ -7,7 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
-import { SCOPE_GROUPS, ensureConfigLayout, getAccountPaths, getConfigRoot, getDefaultAccountPaths, loadAccountsConfig, saveAccountsConfig, upsertAccount, validateAccountId, } from './config.js';
+import { SCOPE_GROUPS, ensureConfigLayout, getAccountPaths, getConfigRoot, getDefaultAccountPaths, loadAccountsConfig, mkdirSecret, saveAccountsConfig, upsertAccount, validateAccountId, writeSecretFile, } from './config.js';
 import { getAccountHealth, getAccountOrThrow, resolveReadAccounts, resolveWriteAccount, } from './accounts.js';
 import { GmailAccountClient, exchangeCodeForToken, generateAuthUrlFromCredentials, readCredentialsFile, } from './gmail-client.js';
 import { saveAndExtract } from './attachments.js';
@@ -2380,9 +2380,9 @@ class GmailMultiInboxServer {
         validateAccountId(args.account_id);
         await ensureConfigLayout(this.configRoot);
         const defaultPaths = getDefaultAccountPaths(this.configRoot, args.account_id);
-        await fs.mkdir(defaultPaths.accountDir, { recursive: true });
+        await mkdirSecret(defaultPaths.accountDir);
         const credentials = await this.parseCredentialsInput(args, defaultPaths.credentialsPath);
-        await fs.writeFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials, null, 2)}\n`, 'utf8');
+        await writeSecretFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials, null, 2)}\n`);
         const { authUrl } = generateAuthUrlFromCredentials(credentials, args.scope_groups);
         let config = await this.loadConfig();
         config = upsertAccount(config, {
@@ -2426,7 +2426,7 @@ class GmailMultiInboxServer {
         if (!tokens.access_token && !tokens.refresh_token) {
             throw new Error('OAuth exchange succeeded but no token payload was returned.');
         }
-        await fs.writeFile(paths.tokenPath, `${JSON.stringify(tokens, null, 2)}\n`, 'utf8');
+        await writeSecretFile(paths.tokenPath, `${JSON.stringify(tokens, null, 2)}\n`);
         const updatedAccount = {
             ...account,
             enabled: true,
@@ -3546,8 +3546,8 @@ loadAccounts();
             const configRoot = getConfigRoot();
             await ensureConfigLayout(configRoot);
             const defaultPaths = getDefaultAccountPaths(configRoot, String(account_id));
-            await fs.mkdir(defaultPaths.accountDir, { recursive: true });
-            await fs.writeFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials_json, null, 2)}\n`, 'utf8');
+            await mkdirSecret(defaultPaths.accountDir);
+            await writeSecretFile(defaultPaths.credentialsPath, `${JSON.stringify(credentials_json, null, 2)}\n`);
             const { authUrl } = generateAuthUrlFromCredentials(credentials_json, scopeGroups);
             let config = await loadAccountsConfig(configRoot);
             config = upsertAccount(config, {
@@ -3579,7 +3579,7 @@ loadAccounts();
             const paths = getAccountPaths(configRoot, account);
             const credentials = await readCredentialsFile(paths.credentialsPath);
             const tokens = await exchangeCodeForToken(credentials, String(authorization_code));
-            await fs.writeFile(paths.tokenPath, `${JSON.stringify(tokens, null, 2)}\n`, 'utf8');
+            await writeSecretFile(paths.tokenPath, `${JSON.stringify(tokens, null, 2)}\n`);
             config = upsertAccount(config, { ...account, enabled: true, credentialPath: paths.credentialsPath, tokenPath: paths.tokenPath });
             await saveAccountsConfig(configRoot, config);
             res.json({ email: account.email });

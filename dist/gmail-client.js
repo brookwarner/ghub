@@ -2,7 +2,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { google } from 'googleapis';
 import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
-import { getAccountPaths } from './config.js';
+import { getAccountPaths, writeSecretFile, } from './config.js';
 export const SCOPE_URLS = {
     'mail.read': 'https://www.googleapis.com/auth/gmail.readonly',
     'mail.send': 'https://www.googleapis.com/auth/gmail.compose',
@@ -520,8 +520,7 @@ export class GmailAccountClient {
         oauth2Client.setCredentials(cachedTokens);
         oauth2Client.on('tokens', (incomingTokens) => {
             cachedTokens = { ...cachedTokens, ...incomingTokens };
-            void fs
-                .writeFile(paths.tokenPath, `${JSON.stringify(cachedTokens, null, 2)}\n`, 'utf8')
+            void writeSecretFile(paths.tokenPath, `${JSON.stringify(cachedTokens, null, 2)}\n`)
                 .catch((error) => {
                 console.error(`[ghub] Failed to persist refreshed token for account ${account.id}:`, error);
             });

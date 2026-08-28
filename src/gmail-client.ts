@@ -2,7 +2,13 @@ import { OAuth2Client, type Credentials } from 'google-auth-library';
 import { google, type calendar_v3, type docs_v1, type drive_v3, type gmail_v1, type sheets_v4, type tasks_v1 } from 'googleapis';
 import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
-import { AccountConfig, type AccountPaths, type ScopeGroup, getAccountPaths } from './config.js';
+import {
+  AccountConfig,
+  type AccountPaths,
+  type ScopeGroup,
+  getAccountPaths,
+  writeSecretFile,
+} from './config.js';
 
 export const SCOPE_URLS = {
   'mail.read':      'https://www.googleapis.com/auth/gmail.readonly',
@@ -833,8 +839,7 @@ export class GmailAccountClient {
     oauth2Client.setCredentials(cachedTokens);
     oauth2Client.on('tokens', (incomingTokens) => {
       cachedTokens = { ...cachedTokens, ...incomingTokens };
-      void fs
-        .writeFile(paths.tokenPath, `${JSON.stringify(cachedTokens, null, 2)}\n`, 'utf8')
+      void writeSecretFile(paths.tokenPath, `${JSON.stringify(cachedTokens, null, 2)}\n`)
         .catch((error) => {
           console.error(
             `[ghub] Failed to persist refreshed token for account ${account.id}:`,
