@@ -10,4 +10,6 @@ COPY vendor/ ./vendor/
 EXPOSE 8080
 ENV PORT=8080
 
+USER node
+
 CMD ["node", "dist/index.js"]
