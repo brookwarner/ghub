@@ -25,7 +25,8 @@ export function getSaveDir() {
 }
 export async function ensureSaveDir() {
     const dir = getSaveDir();
-    await fs.mkdir(dir, { recursive: true });
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    await fs.chmod(dir, 0o700);
     return dir;
 }
 export function sanitizeFilename(raw) {
@@ -55,7 +56,8 @@ export function buildSavePath(attachmentId, filename) {
 export async function saveAttachment(bytes, attachmentId, filename) {
     await ensureSaveDir();
     const outPath = buildSavePath(attachmentId, filename);
-    await fs.writeFile(outPath, bytes);
+    await fs.writeFile(outPath, bytes, { mode: 0o600 });
+    await fs.chmod(outPath, 0o600);
     return outPath;
 }
 function truncate(text) {
@@ -154,8 +156,8 @@ async function extractXlsx(savedPath) {
 }
 async function extractPptx(savedPath) {
     try {
-        const { parseOfficeAsync } = await import('officeparser');
-        const text = await parseOfficeAsync(savedPath);
+        const { parseOffice } = await import('officeparser');
+        const text = (await parseOffice(savedPath)).toText();
         const trimmed = truncate(text ?? '');
         return {
             text: trimmed.text,

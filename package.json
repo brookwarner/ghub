@@ -28,19 +28,25 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/express": "^5.0.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "google-auth-library": "^9.15.1",
-    "googleapis": "^144.0.0",
-    "mammoth": "^1.9.0",
-    "officeparser": "^5.0.0",
+    "google-auth-library": "^10.9.0",
+    "googleapis": "^171.4.0",
+    "mammoth": "^1.13.0",
+    "officeparser": "6.0.7",
     "pdf-parse": "^1.1.1",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/node": "^20.17.10",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "officeparser": {
+      "pdfjs-dist": "5.5.207"
+    },
+    "google-auth-library": "$google-auth-library"
   }
 }

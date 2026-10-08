@@ -36,7 +36,7 @@ jobs:
             if [ ! -d "\$DEPLOY_PATH/.git" ]; then
               echo "First deploy — cloning repository..."
               rm -rf "\$DEPLOY_PATH"
-              git clone git@github.com:brookwarner/multi-gmail-tzak.git "\$DEPLOY_PATH"
+              git clone git@github.com:brookwarner/ghub.git "\$DEPLOY_PATH"
             fi
 
             cd "\$DEPLOY_PATH"
@@ -46,7 +46,7 @@ jobs:
             git reset --hard origin/main
 
             echo "Installing dependencies..."
-            npm install --ignore-scripts --omit=dev
+            npm ci --ignore-scripts --omit=dev
 
             echo "Writing env file..."
             mkdir -p /var/data/multi-gmail

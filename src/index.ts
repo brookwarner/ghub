@@ -4086,6 +4086,14 @@ async function runSseServer(): Promise<void> {
 
   const host = process.env.HOST?.trim() || '0.0.0.0';
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req: Request, res: Response, next: () => void) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    next();
+  });
   const sessions = new Map<string, { app: GmailMultiInboxServer; transport: StreamableHTTPServerTransport }>();
 
   const closeAll = async (): Promise<void> => {
@@ -4126,7 +4134,7 @@ async function runSseServer(): Promise<void> {
     // Fail closed. This process holds live OAuth tokens for every configured
     // Google account, so running without auth is never an acceptable default.
     // For local development set ALLOW_UNAUTHENTICATED=1 explicitly.
-    if (process.env.ALLOW_UNAUTHENTICATED !== '1') {
+    if (process.env.NODE_ENV === 'production' || process.env.ALLOW_UNAUTHENTICATED !== '1') {
       console.error(
         '[ghub] FATAL: SECRET_TOKEN is not set. Refusing to start with all endpoints unprotected.\n' +
           '       Set SECRET_TOKEN in /var/data/multi-gmail/.env (production) or the environment.\n' +
